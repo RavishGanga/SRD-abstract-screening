@@ -15,7 +15,7 @@ from io import BytesIO
 import tempfile
 from pathlib import Path
 import zipfile
-
+from docx.shared import RGBColor
 # =========================
 #  YOUR HELPER FUNCTIONS
 # =========================
@@ -520,25 +520,31 @@ def process_doc(filepath, ref_df, output_folder, remaining_ids):
     # 7) Insert 5 blank lines + abstract number at the top, keeping formatting
     body = doc._element.body
 
-    # Insert "Abstract number: X" paragraph (if we have a number)
     if abstract_nr is not None:
-        p_label = OxmlElement("w:p")
-        r = OxmlElement("w:r")
-        t = OxmlElement("w:t")
-        t.text = f"Abstract number: {abstract_nr}"
-        r.append(t)
-        p_label.append(r)
-        body.insert(0, p_label)
+        # Create a normal paragraph using python-docx API
+        p_label = doc.add_paragraph()
+        run = p_label.add_run(f"Abstract number: {abstract_nr}")
+        run.bold = True
+        run.font.color.rgb = RGBColor(255, 0, 0)
+    
+        # Move paragraph to top of the document
+        body = doc._element.body
+        body.remove(p_label._p)          # Remove from bottom
+        body.insert(0, p_label._p)       # Insert at top
 
     # Insert 5 completely empty paragraphs *above* that
     for _ in range(5):
-        new_p = OxmlElement("w:p")
-        body.insert(0, new_p)
+        empty_p = OxmlElement("w:p")
+        body.insert(0, empty_p)
 
     # 8) Save modified document
-    out_path = Path(output_folder) / (Path(filepath).stem + "_after_research_type.docx")
+    if abstract_nr is not None:
+        output_filename = f"srd_abstract_{abstract_nr}.docx"
+    else:
+        # fallback if no number found
+        output_filename = Path(filepath).stem + "_no_number.docx"
+    out_path = Path(output_folder) / output_filename
     doc.save(out_path)
-
     # 9) Return summary info for this file
     return {
         "file": Path(filepath).name,
@@ -739,3 +745,4 @@ if st.session_state["assignments_df"] is not None:
             file_name="processed_abstracts.zip",
             mime="application/zip",
         )
+
