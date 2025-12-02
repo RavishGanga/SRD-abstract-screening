@@ -3,5 +3,5 @@ pandas
 python-docx
 rapidfuzz
 openpyxl
-pathlib
-zipfile
+
+
