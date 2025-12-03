@@ -172,52 +172,54 @@ def merge_docx_files(doc_paths, output_path, font_name="Arial", font_size=12):
 
     merged_doc.save(output_path)
     
-def create_reviewer_docx_packets(assignments_df, processed_dir, out_zip_path):
-    reviewer_packets = {}
-    processed_dir = Path(processed_dir)
+def merge_docx_files(doc_paths, output_path, font_name="Arial", font_size=12):
+    if not doc_paths:
+        return
 
-    for reviewer, group in assignments_df.groupby("reviewer_name"):
+    master = Document(doc_paths[0])
+    composer = Composer(master)
 
-        # Expected abstract numbers based on assignments
-        abstract_nums = group["abstract_id"].dropna().astype(int).tolist()
-        abstract_nums_sorted = sorted(abstract_nums)
+    # Page breaks between abstracts
+    for doc_path in doc_paths[1:]:
+        p = master.add_paragraph()
+        p.add_run().add_break(WD_BREAK.PAGE)
+        composer.append(Document(doc_path))
 
-        doc_paths = []
-        filename_parts = []   # we will fill this with numbers or "missingX"
+    composer.save(output_path)
 
-        for num in abstract_nums_sorted:
-            doc_path = processed_dir / f"srd_abstract_{num}.docx"
+    # Reload merged doc
+    merged_doc = Document(output_path)
 
-            if doc_path.exists():
-                doc_paths.append(doc_path)
-                filename_parts.append(str(num))
-            else:
-                # Mark missing abstract in filename
-                filename_parts.append(f"missing{num}")
+    # ---- SAFE FORMAT APPLICATION ----
+    from docx.shared import Pt
 
-        # If no available docs → skip
-        if not doc_paths:
-            continue
+    for paragraph in merged_doc.paragraphs:
+        for run in paragraph.runs:
 
-        # Filename now includes missing abstracts explicitly
-        nums_str = "-".join(filename_parts)
-        out_file = f"{reviewer}_Abstracts_{nums_str}.docx"
-        out_path = processed_dir / out_file
+            # Skip image runs
+            has_image = bool(run._r.xpath(".//w:drawing")) or bool(run._r.xpath(".//w:pict"))
+            if has_image:
+                continue
 
-        # Merge DOCX files (only existing ones)
-        merge_docx_files(
-            doc_paths,
-            output_path=out_path
-        )
+            run.font.name = font_name
+            run.font.size = Pt(font_size)
 
-        reviewer_packets[reviewer] = out_path
+    # Apply safe table formatting
+    for table in merged_doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    for run in paragraph.runs:
 
-    # ZIP the packets
-    with zipfile.ZipFile(out_zip_path, "w") as zf:
-        for reviewer, docx_file in reviewer_packets.items():
-            zf.write(docx_file, arcname=docx_file.name)
+                        has_image = bool(run._r.xpath(".//w:drawing")) or bool(run._r.xpath(".//w:pict"))
+                        if has_image:
+                            continue
 
-    return out_zip_path
+                        run.font.name = font_name
+                        run.font.size = Pt(font_size)
+
+    merged_doc.save(output_path)
+
 
 
 
@@ -1049,3 +1051,4 @@ if st.session_state["assignments_df"] is not None:
             file_name="reviewer_merged_packets_doc.zip",
             mime="application/zip",
         )
+
