@@ -153,32 +153,6 @@ def merge_docx_files(doc_paths, output_path, font_name="Arial", font_size=12):
     master = Document(doc_paths[0])
     composer = Composer(master)
 
-    # Add page breaks between each abstract
-    for doc_path in doc_paths[1:]:
-        p = master.add_paragraph()
-        p.add_run().add_break(WD_BREAK.PAGE)
-        composer.append(Document(doc_path))
-
-    composer.save(output_path)
-
-    # Reload merged doc to apply formatting & cleanup
-    merged_doc = Document(output_path)
-
-    # --- Apply uniform font to all text ---
-    for paragraph in merged_doc.paragraphs:
-        for run in paragraph.runs:
-            run.font.name = font_name
-            run.font.size = Pt(font_size)
-
-    merged_doc.save(output_path)
-    
-def merge_docx_files(doc_paths, output_path, font_name="Arial", font_size=12):
-    if not doc_paths:
-        return
-
-    master = Document(doc_paths[0])
-    composer = Composer(master)
-
     # Page breaks between abstracts
     for doc_path in doc_paths[1:]:
         p = master.add_paragraph()
@@ -191,7 +165,6 @@ def merge_docx_files(doc_paths, output_path, font_name="Arial", font_size=12):
     merged_doc = Document(output_path)
 
     # ---- SAFE FORMAT APPLICATION ----
-    from docx.shared import Pt
 
     for paragraph in merged_doc.paragraphs:
         for run in paragraph.runs:
@@ -220,6 +193,53 @@ def merge_docx_files(doc_paths, output_path, font_name="Arial", font_size=12):
 
     merged_doc.save(output_path)
 
+    
+def create_reviewer_docx_packets(assignments_df, processed_dir, out_zip_path):
+    reviewer_packets = {}
+    processed_dir = Path(processed_dir)
+
+    for reviewer, group in assignments_df.groupby("reviewer_name"):
+
+        # Expected abstract numbers based on assignments
+        abstract_nums = group["abstract_id"].dropna().astype(int).tolist()
+        abstract_nums_sorted = sorted(abstract_nums)
+
+        doc_paths = []
+        filename_parts = []   # we will fill this with numbers or "missingX"
+
+        for num in abstract_nums_sorted:
+            doc_path = processed_dir / f"srd_abstract_{num}.docx"
+
+            if doc_path.exists():
+                doc_paths.append(doc_path)
+                filename_parts.append(str(num))
+            else:
+                # Mark missing abstract in filename
+                filename_parts.append(f"missing{num}")
+
+        # If no available docs → skip
+        if not doc_paths:
+            continue
+
+        # Filename now includes missing abstracts explicitly
+        nums_str = "-".join(filename_parts)
+        out_file = f"{reviewer}_Abstracts_{nums_str}.docx"
+        out_path = processed_dir / out_file
+
+        # Merge DOCX files (only existing ones)
+        merge_docx_files(
+            doc_paths,
+            output_path=out_path
+        )
+
+        reviewer_packets[reviewer] = out_path
+
+    # ZIP the packets
+    with zipfile.ZipFile(out_zip_path, "w") as zf:
+        for reviewer, docx_file in reviewer_packets.items():
+            zf.write(docx_file, arcname=docx_file.name)
+
+    return out_zip_path
 
 
 
@@ -1051,4 +1071,3 @@ if st.session_state["assignments_df"] is not None:
             file_name="reviewer_merged_packets_doc.zip",
             mime="application/zip",
         )
-
