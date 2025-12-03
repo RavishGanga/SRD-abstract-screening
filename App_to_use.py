@@ -131,35 +131,35 @@ def force_document_font(doc, font_name="Arial", font_size=12):
 
 def clean_whitespace(doc):
     """
-    Remove ONLY paragraphs that are 100% empty:
-      - no text
-      - no images/drawings
+    Remove paragraphs that are visually empty:
+      - no text (after stripping)
+      - no images
       - no tables
       - no page breaks
-      - no hidden runs
-      - no xml child nodes (other than pPr)
+    This WILL remove those big empty blocks, but keeps figures.
     """
-
-    for p in list(doc.paragraphs):
-        # Collect text
+    for p in list(doc.paragraphs):  # iterate over a copy
+        # 1. All visible text in this paragraph
         text = "".join(run.text for run in p.runs).strip()
 
-        # Detect content
-        has_text = text != ""
-        has_image = bool(p._element.xpath(".//w:drawing")) or bool(p._element.xpath(".//w:pict"))
+        # 2. Does this paragraph contain an image?
+        has_image = bool(p._element.xpath(".//w:drawing")) or bool(
+            p._element.xpath(".//w:pict")
+        )
+
+        # 3. Does it contain a table?
         has_table = bool(p._element.xpath(".//w:tbl"))
-        has_pagebreak = any(run._r.xpath(".//w:br[@w:type='page']") for run in p.runs)
 
-        # If any visible content → KEEP
-        if has_text or has_image or has_table or has_pagebreak:
-            continue
+        # 4. Does it contain a page break?
+        has_pagebreak = any(
+            run._r.xpath(".//w:br[@w:type='page']")
+            for run in p.runs
+        )
 
-        # Now detect truly empty XML: <w:p><w:pPr/></w:p>
-        children = [child for child in p._element.iterchildren()]
-        # Acceptable children: only one <w:pPr>
-        if len(children) == 1 and children[0].tag.endswith("pPr"):
-            # SAFE TO REMOVE
+        # 5. Only remove if it's truly "visually empty"
+        if text == "" and not (has_image or has_table or has_pagebreak):
             p._element.getparent().remove(p._element)
+
 
 
             
@@ -1088,3 +1088,4 @@ if st.session_state["assignments_df"] is not None:
             file_name="reviewer_merged_packets_doc.zip",
             mime="application/zip",
         )
+
