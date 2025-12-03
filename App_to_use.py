@@ -131,32 +131,36 @@ def force_document_font(doc, font_name="Arial", font_size=12):
 
 def clean_whitespace(doc):
     """
-    Remove ONLY paragraphs that:
-      - contain no text
-      - contain no images
-      - contain no tables
-      - contain no page breaks
-    Everything else is preserved.
+    Remove ONLY paragraphs that are 100% empty:
+      - no text
+      - no images/drawings
+      - no tables
+      - no page breaks
+      - no hidden runs
+      - no xml child nodes (other than pPr)
     """
-    for p in list(doc.paragraphs):  # iterate over a copy
-        # Paragraph contains text?
+
+    for p in list(doc.paragraphs):
+        # Collect text
         text = "".join(run.text for run in p.runs).strip()
 
-        # Contains image?
+        # Detect content
+        has_text = text != ""
         has_image = bool(p._element.xpath(".//w:drawing")) or bool(p._element.xpath(".//w:pict"))
-
-        # Contains table?
         has_table = bool(p._element.xpath(".//w:tbl"))
+        has_pagebreak = any(run._r.xpath(".//w:br[@w:type='page']") for run in p.runs)
 
-        # Contains page break?
-        has_pagebreak = any(
-            run._r.xpath(".//w:br[@w:type='page']")
-            for run in p.runs
-        )
+        # If any visible content → KEEP
+        if has_text or has_image or has_table or has_pagebreak:
+            continue
 
-        # Remove ONLY if truly empty and no other content exists
-        if text == "" and not (has_image or has_table or has_pagebreak):
+        # Now detect truly empty XML: <w:p><w:pPr/></w:p>
+        children = [child for child in p._element.iterchildren()]
+        # Acceptable children: only one <w:pPr>
+        if len(children) == 1 and children[0].tag.endswith("pPr"):
+            # SAFE TO REMOVE
             p._element.getparent().remove(p._element)
+
 
             
 def merge_docx_files(doc_paths, output_path, font_name="Arial", font_size=12):
