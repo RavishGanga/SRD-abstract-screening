@@ -83,23 +83,81 @@ from docx.shared import Pt
 
 #     return out_zip_path
 
+def force_document_font(doc, font_name="Arial", font_size=12):
+    from docx.shared import Pt
+
+    # ---- 1) Update Normal style ----
+    try:
+        normal = doc.styles["Normal"]
+        normal.font.name = font_name
+        normal.font.size = Pt(font_size)
+    except:
+        pass
+
+    # ---- 2) Loop over all paragraphs & runs ----
+    for paragraph in doc.paragraphs:
+        # Update paragraph style if possible
+        try:
+            paragraph.style.font.name = font_name
+            paragraph.style.font.size = Pt(font_size)
+        except:
+            pass
+
+        for run in paragraph.runs:
+            # ❗ SKIP runs that contain images, or drawings
+            has_image = bool(run._r.xpath(".//w:drawing")) or bool(run._r.xpath(".//w:pict"))
+
+            if has_image:
+                continue  # DO NOT TOUCH IMAGE RUNS
+
+            # Otherwise update font
+            run.font.name = font_name
+            run.font.size = Pt(font_size)
+
+    # ---- 3) Update table text safely ----
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    for run in paragraph.runs:
+                        # Skip images inside table cells too
+                        has_image = bool(run._r.xpath(".//w:drawing")) or bool(run._r.xpath(".//w:pict"))
+
+                        if has_image:
+                            continue
+
+                        run.font.name = font_name
+                        run.font.size = Pt(font_size)
 
 def clean_whitespace(doc):
     """
-    Remove paragraphs that are empty, contain only whitespace,
-    or contain only empty runs.
+    Remove ONLY paragraphs that:
+      - contain no text
+      - contain no images
+      - contain no tables
+      - contain no page breaks
+    Everything else is preserved.
     """
-    removed = 0
-    for p in doc.paragraphs:
-        # Combine all text of the paragraph
-        text = "".join(run.text for run in p.runs)
+    for p in list(doc.paragraphs):  # iterate over a copy
+        # Paragraph contains text?
+        text = "".join(run.text for run in p.runs).strip()
 
-        # Remove if paragraph is completely empty or whitespace
-        if text.strip() == "":
+        # Contains image?
+        has_image = bool(p._element.xpath(".//w:drawing")) or bool(p._element.xpath(".//w:pict"))
+
+        # Contains table?
+        has_table = bool(p._element.xpath(".//w:tbl"))
+
+        # Contains page break?
+        has_pagebreak = any(
+            run._r.xpath(".//w:br[@w:type='page']")
+            for run in p.runs
+        )
+
+        # Remove ONLY if truly empty and no other content exists
+        if text == "" and not (has_image or has_table or has_pagebreak):
             p._element.getparent().remove(p._element)
-            removed += 1
 
-    return removed
             
 def merge_docx_files(doc_paths, output_path, font_name="Arial", font_size=12):
     if not doc_paths:
@@ -773,7 +831,10 @@ def process_doc(filepath, ref_df, output_folder, remaining_ids):
         empty_p = OxmlElement("w:p")
         body.insert(1, empty_p)
 
-
+    # -----------------------------
+    # 9) Apply uniform font (Arial, size 12)
+    # -----------------------------
+    force_document_font(doc, font_name="Arial", font_size=12)
 
     # -----------------------------
     # 10) Save DOCX
