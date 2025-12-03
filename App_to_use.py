@@ -83,51 +83,6 @@ from docx.shared import Pt
 
 #     return out_zip_path
 
-def force_document_font(doc, font_name="Arial", font_size=12):
-    from docx.shared import Pt
-
-    # ---- 1) Update Normal style ----
-    try:
-        normal = doc.styles["Normal"]
-        normal.font.name = font_name
-        normal.font.size = Pt(font_size)
-    except:
-        pass
-
-    # ---- 2) Loop over all paragraphs & runs ----
-    for paragraph in doc.paragraphs:
-        # Update paragraph style if possible
-        try:
-            paragraph.style.font.name = font_name
-            paragraph.style.font.size = Pt(font_size)
-        except:
-            pass
-
-        for run in paragraph.runs:
-            # ❗ SKIP runs that contain images, or drawings
-            has_image = bool(run._r.xpath(".//w:drawing")) or bool(run._r.xpath(".//w:pict"))
-
-            if has_image:
-                continue  # DO NOT TOUCH IMAGE RUNS
-
-            # Otherwise update font
-            run.font.name = font_name
-            run.font.size = Pt(font_size)
-
-    # ---- 3) Update table text safely ----
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for paragraph in cell.paragraphs:
-                    for run in paragraph.runs:
-                        # Skip images inside table cells too
-                        has_image = bool(run._r.xpath(".//w:drawing")) or bool(run._r.xpath(".//w:pict"))
-
-                        if has_image:
-                            continue
-
-                        run.font.name = font_name
-                        run.font.size = Pt(font_size)
 
 def clean_whitespace(doc):
     """
@@ -818,10 +773,7 @@ def process_doc(filepath, ref_df, output_folder, remaining_ids):
         empty_p = OxmlElement("w:p")
         body.insert(1, empty_p)
 
-    # -----------------------------
-    # 9) Apply uniform font (Arial, size 12)
-    # -----------------------------
-    force_document_font(doc, font_name="Arial", font_size=12)
+
 
     # -----------------------------
     # 10) Save DOCX
