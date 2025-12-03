@@ -16,9 +16,210 @@ import tempfile
 from pathlib import Path
 import zipfile
 from docx.shared import RGBColor
+from docxcompose.composer import Composer
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK
+from docx.shared import Pt
+
+# import pypandoc
 # =========================
 #  YOUR HELPER FUNCTIONS
 # =========================
+
+# def docx_to_pdf(docx_path, pdf_path):
+#     try:
+#         pypandoc.convert_file(
+#             source_file=str(docx_path),
+#             to="pdf",
+#             outputfile=str(pdf_path),
+#             extra_args=[
+#                 "--pdf-engine=xelatex",
+#                 "-V", "mainfont=Arial",
+#                 "-V", "sansfont=Arial",
+#                 "-V", "monofont=Courier New",
+#             ],
+#         )
+#         return True
+#     except Exception as e:
+#         # Optional: log or collect errors
+#         print(f"PDF conversion failed for {docx_path}: {e}")
+#         return False
+#
+# def create_reviewer_pdf_packets(assignments_df, processed_dir, out_zip_path):
+#     import zipfile
+#     reviewer_packets = {}
+#     processed_dir = Path(processed_dir)
+
+#     for reviewer, group in assignments_df.groupby("reviewer_name"):
+#         abstract_nums = group["abstract_id"].dropna().astype(int).tolist()
+#         abstract_nums_sorted = sorted(abstract_nums)
+
+#         doc_paths = []
+#         for num in abstract_nums_sorted:
+#             filename = f"srd_abstract_{num}.docx"
+#             path = processed_dir / filename
+#             if path.exists():
+#                 doc_paths.append(path)
+
+#         if not doc_paths:
+#             continue
+
+#         # DOCX output name
+#         nums_str = "-".join(str(x) for x in abstract_nums_sorted)
+#         docx_out = processed_dir / f"{reviewer}_Abstracts_{nums_str}.docx"
+#         pdf_out = processed_dir / f"{reviewer}_Abstracts_{nums_str}.pdf"
+
+#         # Merge DOCX
+#         merge_docx_files(doc_paths, docx_out)
+
+#         # Convert to PDF
+#         docx_to_pdf(docx_out, pdf_out)
+
+#         reviewer_packets[reviewer] = pdf_out
+
+#     # ZIP all PDFs
+#     with zipfile.ZipFile(out_zip_path, "w") as zf:
+#         for reviewer, pdf_file in reviewer_packets.items():
+#             zf.write(pdf_file, arcname=pdf_file.name)
+
+#     return out_zip_path
+
+def force_document_font(doc, font_name="Arial", font_size=12):
+    from docx.shared import Pt
+
+    # ---- 1) Update Normal style ----
+    try:
+        normal = doc.styles["Normal"]
+        normal.font.name = font_name
+        normal.font.size = Pt(font_size)
+    except:
+        pass
+
+    # ---- 2) Loop over all paragraphs & runs ----
+    for paragraph in doc.paragraphs:
+        # Update paragraph style if possible
+        try:
+            paragraph.style.font.name = font_name
+            paragraph.style.font.size = Pt(font_size)
+        except:
+            pass
+
+        for run in paragraph.runs:
+            # ❗ SKIP runs that contain images, or drawings
+            has_image = bool(run._r.xpath(".//w:drawing")) or bool(run._r.xpath(".//w:pict"))
+
+            if has_image:
+                continue  # DO NOT TOUCH IMAGE RUNS
+
+            # Otherwise update font
+            run.font.name = font_name
+            run.font.size = Pt(font_size)
+
+    # ---- 3) Update table text safely ----
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    for run in paragraph.runs:
+                        # Skip images inside table cells too
+                        has_image = bool(run._r.xpath(".//w:drawing")) or bool(run._r.xpath(".//w:pict"))
+
+                        if has_image:
+                            continue
+
+                        run.font.name = font_name
+                        run.font.size = Pt(font_size)
+
+def clean_whitespace(doc):
+    """
+    Remove paragraphs that are empty, contain only whitespace,
+    or contain only empty runs.
+    """
+    removed = 0
+    for p in doc.paragraphs:
+        # Combine all text of the paragraph
+        text = "".join(run.text for run in p.runs)
+
+        # Remove if paragraph is completely empty or whitespace
+        if text.strip() == "":
+            p._element.getparent().remove(p._element)
+            removed += 1
+
+    return removed
+            
+def merge_docx_files(doc_paths, output_path, font_name="Arial", font_size=12):
+    if not doc_paths:
+        return
+
+    master = Document(doc_paths[0])
+    composer = Composer(master)
+
+    # Add page breaks between each abstract
+    for doc_path in doc_paths[1:]:
+        p = master.add_paragraph()
+        p.add_run().add_break(WD_BREAK.PAGE)
+        composer.append(Document(doc_path))
+
+    composer.save(output_path)
+
+    # Reload merged doc to apply formatting & cleanup
+    merged_doc = Document(output_path)
+
+    # --- Apply uniform font to all text ---
+    for paragraph in merged_doc.paragraphs:
+        for run in paragraph.runs:
+            run.font.name = font_name
+            run.font.size = Pt(font_size)
+
+    merged_doc.save(output_path)
+    
+def create_reviewer_docx_packets(assignments_df, processed_dir, out_zip_path):
+    reviewer_packets = {}
+    processed_dir = Path(processed_dir)
+
+    for reviewer, group in assignments_df.groupby("reviewer_name"):
+
+        # Expected abstract numbers based on assignments
+        abstract_nums = group["abstract_id"].dropna().astype(int).tolist()
+        abstract_nums_sorted = sorted(abstract_nums)
+
+        doc_paths = []
+        filename_parts = []   # we will fill this with numbers or "missingX"
+
+        for num in abstract_nums_sorted:
+            doc_path = processed_dir / f"srd_abstract_{num}.docx"
+
+            if doc_path.exists():
+                doc_paths.append(doc_path)
+                filename_parts.append(str(num))
+            else:
+                # Mark missing abstract in filename
+                filename_parts.append(f"missing{num}")
+
+        # If no available docs → skip
+        if not doc_paths:
+            continue
+
+        # Filename now includes missing abstracts explicitly
+        nums_str = "-".join(filename_parts)
+        out_file = f"{reviewer}_Abstracts_{nums_str}.docx"
+        out_path = processed_dir / out_file
+
+        # Merge DOCX files (only existing ones)
+        merge_docx_files(
+            doc_paths,
+            output_path=out_path
+        )
+
+        reviewer_packets[reviewer] = out_path
+
+    # ZIP the packets
+    with zipfile.ZipFile(out_zip_path, "w") as zf:
+        for reviewer, docx_file in reviewer_packets.items():
+            zf.write(docx_file, arcname=docx_file.name)
+
+    return out_zip_path
+
+
 
 def clean_name(name):
     if name is None:
@@ -80,15 +281,42 @@ def extract_docx_text_with_superscripts(filepath):
 
 
 def find_first_marker(doc):
-    marker_order = [
+    """
+    Finds the first paragraph that signals the start of the research type section.
+    Supports many variations and languages.
+    """
+
+    markers = [
+        # English
         "choose your research type",
         "clinical",
         "fundamental",
+        "your research type",
+        "research type",
+        "type of research",
+        "category of research",
+        "research classification",
+        "clinical research",
+        "fundamental research",
+        "translational research",
+        "basic research",
+        "applied research",
+
+        # Dutch (common variants)
+        "onderzoekstype",
+        "kies uw onderzoekstype",
+        "type onderzoek",
+        "onderzoek type",
     ]
 
-    for marker in marker_order:
-        for i, p in enumerate(doc.paragraphs):
-            if marker in p.text.lower():
+    # lowercase markers for efficiency
+    markers = [m.lower() for m in markers]
+
+    for i, p in enumerate(doc.paragraphs):
+        text = p.text.lower().strip()
+
+        for marker in markers:
+            if marker in text:
                 return i
 
     return None
@@ -262,14 +490,23 @@ def match_author_name(input_name, ref_df, ref_col="name"):
 
 def fuzzy_merge(df1, df2, key1, key2, threshold=90, scorer=fuzz.partial_ratio):
     matches = []
+    # Ensure df2 key column is all strings and drop NaNs
+    df2_clean = df2.dropna(subset=[key2]).copy()
+    df2_clean[key2] = df2_clean[key2].astype(str)
+
     for idx, row in df1.iterrows():
-        name = row[key1]
-        match = process.extractOne(name, df2[key2].tolist(), scorer=scorer)
+        val = row[key1]
+        if pd.isna(val):
+            continue
+        name = str(val)
+
+        match = process.extractOne(name, df2_clean[key2].tolist(), scorer=scorer)
         if match and match[1] >= threshold:
             matched_name = match[0]
-            matched_row = df2[df2[key2] == matched_name].iloc[0]
+            matched_row = df2_clean[df2_clean[key2] == matched_name].iloc[0]
             combined = {**row.to_dict(), **matched_row.to_dict()}
             matches.append(combined)
+
     return pd.DataFrame(matches)
 
 
@@ -363,18 +600,34 @@ def assign_reviewers(authors, reviewers, max_reviews=8, reviewers_per_abs=3, con
 
 def prepare_ref_and_authors(ref_file, trans_file):
     """Prepares ref_df (for name → abstract_nr) and authors DF (for assignments)."""
+
     # translations
     trans_df = pd.read_excel(trans_file).drop_duplicates()
-
-    separators = r"[;,+/]+"
-
-    # reference registrations
+    
+    required_cols = {"English", "department"}
+    missing = required_cols - set(trans_df.columns)
+    if missing:
+        raise ValueError(f"Missing required columns in registrations file: {missing}")
+        
+        
     ref_df = pd.read_excel(ref_file)
+    separators = r"[;,+/]+"
     ref_df.columns = ref_df.columns.str.lower().str.replace(" ", "_")
-    ref_df = ref_df.apply(lambda col: col.astype(str).str.strip())
-
-    # Expand multiple departments
-    ref_df["department_"] = ref_df["department_"].fillna("")
+    
+    required_cols = {"name", "department_", "abstract_nr._"}
+    missing = required_cols - set(ref_df.columns)
+    if missing:
+        raise ValueError(f"Missing required columns in registrations file: {missing}")
+    
+    
+    
+    # Clean only specific columns:
+    for col in ["name", "department_", "abstract_nr._"]:
+        if col in ref_df.columns:
+            ref_df[col] = ref_df[col].astype(str).str.strip()
+    
+    # Then handle NaNs in department_ properly
+    ref_df["department_"] = ref_df["department_"].replace("nan", "").fillna("")
 
     # SPLIT into lists
     ref_df["department"] = ref_df["department_"].str.split(separators, regex=True)
@@ -410,10 +663,13 @@ def prepare_ref_and_authors(ref_file, trans_file):
 
 
 def process_doc(filepath, ref_df, output_folder, remaining_ids):
-    # 1) Extract raw text lines from the docx (for parsing)
+
+    # -----------------------------
+    # 1) Extract raw text lines
+    # -----------------------------
     txt = extract_docx_text_with_superscripts(filepath)
 
-    # Helper to find a line index containing a phrase
+    # Helper to find line index
     def find_line(phrase):
         for i, line in enumerate(txt):
             if phrase.lower() in line.lower():
@@ -423,8 +679,11 @@ def process_doc(filepath, ref_df, output_folder, remaining_ids):
     author_line = find_line("author")
     aff_line = find_line("affiliations")
 
-    # If no affiliations, skip
+    # If missing metadata → just copy file unchanged
     if aff_line is None or author_line is None:
+        doc = Document(filepath)
+        out_path = Path(output_folder) / (Path(filepath).stem + "_unchanged.docx")
+        doc.save(out_path)
         return {
             "file": Path(filepath).name,
             "name": None,
@@ -433,15 +692,10 @@ def process_doc(filepath, ref_df, output_folder, remaining_ids):
             "matched": False,
         }
 
-    # 2) Extract first author from the "Author(s)" line
+    # -----------------------------
+    # 2) Extract FIRST author name
+    # -----------------------------
     def extract_first_author(txt, author_line_index):
-        """
-        Extracts the first author name.
-        If the author name is not on the same line as 'Author(s)',
-        it checks the next lines until a non-empty valid name is found.
-        """
-    
-        # 1) Try same line first
         line = txt[author_line_index]
         line_clean = (
             line.replace("Authors:", "")
@@ -450,57 +704,54 @@ def process_doc(filepath, ref_df, output_folder, remaining_ids):
                 .replace("Author", "")
                 .strip()
         )
-    
-        # If the same line contains a name like "L.A.E.M. van Houtum¹"
         if line_clean and not line_clean.lower().startswith("affiliation"):
-            # First token until comma if multiple authors
             first = line_clean.split(",")[0].strip()
-            first = re.sub(r"\d+$", "", first).strip()  # remove footnote digits
-            if len(first) > 0:
+            first = re.sub(r"\d+$", "", first).strip()
+            if first:
                 return first
-    
-        # 2) Otherwise → check following lines until we find a name
+
+        # Otherwise check following lines
         i = author_line_index + 1
         while i < len(txt):
             candidate = txt[i].strip()
-            # skip blank lines
             if not candidate:
                 i += 1
                 continue
-            # skip lines like "Department", "Affiliations"
             if "affiliation" in candidate.lower():
                 break
-            # extract only the first author before commas
             first = candidate.split(",")[0].strip()
             first = re.sub(r"\d+$", "", first).strip()
-            if len(first) > 0:
+            if first:
                 return first
             i += 1
-    
-        return ""  # failed (rare)
+
+        return ""
+
     name = extract_first_author(txt, author_line)
     name = clean_name(name)
 
-    # 3) Match this name to ref_df["name"] using your fuzzy matcher
+    # -----------------------------
+    # 3) Fuzzy-match author name
+    # -----------------------------
     matched_name = match_author_name(name, ref_df, "name")
 
-    # 4) Get abstract_nr for this matched name (if present)
-# Assign one unique abstract number per matched author
+    # -----------------------------
+    # 4) Assign abstract number
+    # -----------------------------
     abstract_nr = None
-    
     if matched_name:
         key = matched_name.strip()
-    
         if key in remaining_ids and len(remaining_ids[key]) > 0:
-            abstract_nr = remaining_ids[key].pop(0)   # TAKE & REMOVE ONE NUMBER
+            abstract_nr = remaining_ids[key].pop(0)
 
-    # 5) Now open the original doc as a Document to modify it
+    # -----------------------------
+    # 5) Load the actual DOCX
+    # -----------------------------
     doc = Document(filepath)
 
-    # Find "choose your research type" paragraph index
+    # Find the marker to cut off the top
     research_idx = find_first_marker(doc)
 
-    # If not found, just save a copy without changes (but still return metadata)
     if research_idx is None:
         out_path = Path(output_folder) / (Path(filepath).stem + "_unchanged.docx")
         doc.save(out_path)
@@ -512,40 +763,58 @@ def process_doc(filepath, ref_df, output_folder, remaining_ids):
             "matched": abstract_nr is not None,
         }
 
-    # 6) Remove all paragraphs before that index
+    # Remove paragraphs before the marker
     for _ in range(research_idx):
         p = doc.paragraphs[0]
         p._element.getparent().remove(p._element)
 
-    # 7) Insert 5 blank lines + abstract number at the top, keeping formatting
     body = doc._element.body
 
+    # -----------------------------
+    # 6) Clean whitespace BEFORE inserting abstract number
+    # -----------------------------
+    clean_whitespace(doc)
+
+    # -----------------------------
+    # 7) Insert ABSTRACT NUMBER at top
+    # -----------------------------
     if abstract_nr is not None:
-        # Create a normal paragraph using python-docx API
         p_label = doc.add_paragraph()
+        p_label.alignment = WD_ALIGN_PARAGRAPH.CENTER
         run = p_label.add_run(f"Abstract number: {abstract_nr}")
         run.bold = True
         run.font.color.rgb = RGBColor(255, 0, 0)
-    
-        # Move paragraph to top of the document
-        body = doc._element.body
-        body.remove(p_label._p)          # Remove from bottom
-        body.insert(0, p_label._p)       # Insert at top
 
-    # Insert 5 completely empty paragraphs *above* that
+        # move to top
+        body.remove(p_label._p)
+        body.insert(0, p_label._p)
+
+    # -----------------------------
+    # 8) Insert 5 clean blank lines UNDER header
+    # -----------------------------
     for _ in range(5):
         empty_p = OxmlElement("w:p")
-        body.insert(0, empty_p)
+        body.insert(1, empty_p)
 
-    # 8) Save modified document
+    # -----------------------------
+    # 9) Apply uniform font (Arial, size 12)
+    # -----------------------------
+    force_document_font(doc, font_name="Arial", font_size=12)
+
+    # -----------------------------
+    # 10) Save DOCX
+    # -----------------------------
     if abstract_nr is not None:
         output_filename = f"srd_abstract_{abstract_nr}.docx"
     else:
-        # fallback if no number found
         output_filename = Path(filepath).stem + "_no_number.docx"
+
     out_path = Path(output_folder) / output_filename
     doc.save(out_path)
-    # 9) Return summary info for this file
+
+    # -----------------------------
+    # 11) Return metadata
+    # -----------------------------
     return {
         "file": Path(filepath).name,
         "name": name,
@@ -650,9 +919,35 @@ def run_pipeline(ref_file, trans_file, reviewer_file, docx_files):
         for f in output_dir.iterdir():
             zf.write(f, arcname=f.name)
     zip_buffer.seek(0)
-
-    return assignments_df, results_df, assignments_buffer, zip_buffer
-
+    
+    # --- NEW: Create reviewer DOCX packets ---
+    reviewer_docx_zip_buffer = BytesIO()
+    reviewer_docx_temp = workdir / "reviewer_packets_docx.zip"
+    
+    create_reviewer_docx_packets(assignments_df, output_dir, reviewer_docx_temp)
+    
+    with open(reviewer_docx_temp, "rb") as f:
+        reviewer_docx_zip_buffer.write(f.read())
+    reviewer_docx_zip_buffer.seek(0)
+        
+    # # --- NEW: Create reviewer PDF packets ---
+    # reviewer_pdf_zip_buffer = BytesIO()
+    # reviewer_pdf_temp = workdir / "reviewer_packets_pdf.zip"
+    
+    # create_reviewer_pdf_packets(assignments_df, output_dir, reviewer_pdf_temp)
+    
+    # # Load into memory
+    # with open(reviewer_pdf_temp, "rb") as f:
+    #     reviewer_pdf_zip_buffer.write(f.read())
+    # reviewer_pdf_zip_buffer.seek(0)
+    
+    return (
+        assignments_df,
+        results_df,
+        assignments_buffer,
+        zip_buffer,
+        reviewer_docx_zip_buffer,
+    )
 
 # =========================
 #  STREAMLIT APP
@@ -698,6 +993,7 @@ if "assignments_df" not in st.session_state:
     st.session_state["results_df"] = None
     st.session_state["assignments_bytes"] = None
     st.session_state["zip_bytes"] = None
+    st.session_state["reviewer_doc_zip_bytes"] = None  # <-- MISSING ONE
 
 if run_btn:
     if not (ref_file and trans_file and reviewer_file and docx_files):
@@ -710,13 +1006,14 @@ if run_btn:
                     results_df,
                     assignments_bytes,
                     zip_bytes,
+                    reviewer_doc_zip_bytes,
                 ) = run_pipeline(ref_file, trans_file, reviewer_file, docx_files)
 
                 st.session_state["assignments_df"] = assignments_df
                 st.session_state["results_df"] = results_df
                 st.session_state["assignments_bytes"] = assignments_bytes
                 st.session_state["zip_bytes"] = zip_bytes
-
+                st.session_state["reviewer_doc_zip_bytes"] = reviewer_doc_zip_bytes
                 st.success("Processing complete!")
             except Exception as e:
                 st.error(f"Error during processing: {e}")
@@ -730,7 +1027,7 @@ if st.session_state["assignments_df"] is not None:
     st.subheader("DOCX processing summary")
     st.dataframe(st.session_state["results_df"], use_container_width=True)
 
-    col1, col2 = st.columns(2)
+    col1, col2,col3 = st.columns(3)
     with col1:
         st.download_button(
             "Download assignments (Excel)",
@@ -745,4 +1042,10 @@ if st.session_state["assignments_df"] is not None:
             file_name="processed_abstracts.zip",
             mime="application/zip",
         )
-
+    with col3:
+        st.download_button(
+            "Download reviewer packets (DOC ZIP)",
+            data=st.session_state["reviewer_doc_zip_bytes"],
+            file_name="reviewer_merged_packets_doc.zip",
+            mime="application/zip",
+        )
