@@ -872,18 +872,21 @@ def process_doc(filepath, ref_df, output_folder, remaining_ids):
     clean_whitespace(doc)
 
     # -----------------------------
-    # 7) Insert ABSTRACT NUMBER at top
+    # 7) Insert ABSTRACT NUMBER at below title
     # -----------------------------
     if abstract_nr is not None:
+        title_p = doc.paragraphs[0]
+    
         p_label = doc.add_paragraph()
         p_label.alignment = WD_ALIGN_PARAGRAPH.CENTER
         run = p_label.add_run(f"Abstract number: {abstract_nr}")
         run.bold = True
         run.font.color.rgb = RGBColor(255, 0, 0)
-
-        # move to top
+    
+        # Move paragraph directly below title
         body.remove(p_label._p)
-        body.insert(0, p_label._p)
+        title_p._p.addnext(p_label._p)
+
 
     # -----------------------------
     # 8) Insert 5 clean blank lines UNDER header
@@ -1145,6 +1148,7 @@ if st.session_state["assignments_df"] is not None:
             file_name="reviewer_merged_packets_doc.zip",
             mime="application/zip",
         )
+
 
 
 
