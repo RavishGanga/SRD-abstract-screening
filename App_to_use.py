@@ -861,7 +861,7 @@ def process_doc(filepath, ref_df, output_folder, remaining_ids):
 
     # Remove paragraphs before the marker
     for _ in range(research_idx):
-        p = doc.paragraphs[0]
+        p = doc.paragraphs[1]
         p._element.getparent().remove(p._element)
 
     body = doc._element.body
@@ -1145,5 +1145,6 @@ if st.session_state["assignments_df"] is not None:
             file_name="reviewer_merged_packets_doc.zip",
             mime="application/zip",
         )
+
 
 
