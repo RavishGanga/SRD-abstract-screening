@@ -846,8 +846,8 @@ def process_doc(filepath, ref_df, output_folder, remaining_ids):
     doc = Document(filepath)
 
     # Find the marker to cut off the top
-    research_idx = find_first_marker(doc)
-
+    res = find_first_marker(doc)
+    research_idx = res["paragraph_index"] if res else None
     if research_idx is None:
         out_path = Path(output_folder) / (Path(filepath).stem + "_unchanged.docx")
         doc.save(out_path)
@@ -1145,6 +1145,7 @@ if st.session_state["assignments_df"] is not None:
             file_name="reviewer_merged_packets_doc.zip",
             mime="application/zip",
         )
+
 
 
 
