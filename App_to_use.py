@@ -319,46 +319,103 @@ def extract_docx_text_with_superscripts(filepath):
     return lines
 
 
-def find_first_marker(doc):
-    """
-    Finds the first paragraph that signals the start of the research type section.
-    Supports many variations and languages.
-    """
-
-    markers = [
-        # English
+MARKER_TIERS = [
+    # Tier 1: most specific (preferred)
+    [
         "choose your research type",
-        "clinical",
-        "fundamental",
+        "kies uw onderzoekstype",
         "your research type",
-        "research type",
-        "type of research",
-        "category of research",
+        "research type:",
+        "onderzoekstype:",
+        "type of research:",
+    ],
+
+    # Tier 2: explicit category phrases
+    [
         "research classification",
+        "category of research",
         "clinical research",
         "fundamental research",
         "translational research",
         "basic research",
         "applied research",
+    ],
 
-        # Dutch (common variants)
-        "onderzoekstype",
-        "kies uw onderzoekstype",
+    # Tier 3: still OK but broader
+    [
+        "research type",
+        "type of research",
         "type onderzoek",
         "onderzoek type",
-    ]
+    ],
+]
 
-    # lowercase markers for efficiency
-    markers = [m.lower() for m in markers]
+# Tier 4: ultra-generic fallback (only if nothing else found)
+FALLBACK_WORDS = ["clinical", "fundamental"]
 
+
+def _looks_like_option_line(text: str) -> bool:
+    """
+    Heuristic: accept 'clinical'/'fundamental' only if the paragraph looks like an option/label.
+    Reject long sentences like affiliations.
+    """
+    t = text.strip()
+
+    # too long -> likely sentence / affiliation
+    if len(t) > 40:
+        return False
+
+    # contains "department", "university", etc. -> likely affiliation/header text
+    if re.search(r"\b(department|universit|erasmus|mc|rotterdam|affiliation)\b", t, flags=re.I):
+        return False
+
+    # if it starts with a number or bullet, or is just a short label, we allow it
+    return True
+
+
+def find_first_marker(doc):
+    # 1) Search tier 1-3 in order
+    for tier_idx, tier in enumerate(MARKER_TIERS, start=1):
+        tier = [m.lower() for m in tier]
+
+        for i, p in enumerate(doc.paragraphs):
+            text = p.text.strip()
+            low = text.lower()
+
+            if not low:
+                continue
+
+            for marker in tier:
+                if marker in low:
+                    return {
+                        "paragraph_index": i,
+                        "marker": marker,
+                        "tier": tier_idx,
+                        "text": text,
+                    }
+
+    # 2) Final fallback tier: "clinical"/"fundamental" ONLY with safeguards
     for i, p in enumerate(doc.paragraphs):
-        text = p.text.lower().strip()
+        text = p.text.strip()
+        low = text.lower()
+        if not low:
+            continue
 
-        for marker in markers:
-            if marker in text:
-                return i
+        if not _looks_like_option_line(text):
+            continue
+
+        for w in FALLBACK_WORDS:
+            # whole-word match
+            if re.search(rf"\b{re.escape(w)}\b", low):
+                return {
+                    "paragraph_index": i,
+                    "marker": w,
+                    "tier": 4,
+                    "text": text,
+                }
 
     return None
+
 
 
 
@@ -1088,4 +1145,5 @@ if st.session_state["assignments_df"] is not None:
             file_name="reviewer_merged_packets_doc.zip",
             mime="application/zip",
         )
+
 
