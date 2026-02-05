@@ -4,7 +4,6 @@ Created on Tue Dec  2 12:57:17 2025
 
 @author: ravis
 """
-
 import streamlit as st
 import pandas as pd
 import re
@@ -83,6 +82,21 @@ from docx.shared import Pt
 
 #     return out_zip_path
 
+def ensure_output_dir():
+    """
+    Create (once) a stable temp output directory for this Streamlit session.
+    Prevents RAM blowups by keeping large zips on disk.
+    """
+    if "output_dir" not in st.session_state:
+        st.session_state["output_dir"] = tempfile.mkdtemp(prefix="srd_streamlit_")
+    return Path(st.session_state["output_dir"])
+
+def write_bytesio_to_file(buf: BytesIO, out_path: Path):
+    out_path.write_bytes(buf.getvalue())
+    return str(out_path)
+
+
+
 def force_document_font(doc, font_name="Arial", font_size=12):
     from docx.shared import Pt
 
@@ -104,14 +118,13 @@ def force_document_font(doc, font_name="Arial", font_size=12):
             pass
 
         for run in paragraph.runs:
-            # ❗ SKIP runs that contain images, or drawings
+            
             has_image = bool(run._r.xpath(".//w:drawing")) or bool(run._r.xpath(".//w:pict"))
 
             if has_image:
                 continue  # DO NOT TOUCH IMAGE RUNS
 
             # Otherwise update font
-            run.font.name = font_name
             run.font.size = Pt(font_size)
 
     # ---- 3) Update table text safely ----
@@ -319,6 +332,7 @@ def extract_docx_text_with_superscripts(filepath):
     return lines
 
 
+
 MARKER_TIERS = [
     # Tier 1: most specific (preferred)
     [
@@ -415,7 +429,6 @@ def find_first_marker(doc):
                 }
 
     return None
-
 
 
 
@@ -848,6 +861,7 @@ def process_doc(filepath, ref_df, output_folder, remaining_ids):
     # Find the marker to cut off the top
     res = find_first_marker(doc)
     research_idx = res["paragraph_index"] if res else None
+
     if research_idx is None:
         out_path = Path(output_folder) / (Path(filepath).stem + "_unchanged.docx")
         doc.save(out_path)
@@ -860,7 +874,7 @@ def process_doc(filepath, ref_df, output_folder, remaining_ids):
         }
 
     # Remove paragraphs before the marker
-    for _ in range(research_idx-1):
+    for _ in range(research_idx):
         p = doc.paragraphs[1]
         p._element.getparent().remove(p._element)
 
@@ -871,8 +885,6 @@ def process_doc(filepath, ref_df, output_folder, remaining_ids):
     # -----------------------------
     clean_whitespace(doc)
 
-    # -----------------------------
-    # 7) Insert ABSTRACT NUMBER at below title
     # -----------------------------
     if abstract_nr is not None:
         title_p = doc.paragraphs[0]
@@ -886,7 +898,6 @@ def process_doc(filepath, ref_df, output_folder, remaining_ids):
         # Move paragraph directly below title
         body.remove(p_label._p)
         title_p._p.addnext(p_label._p)
-
 
     # -----------------------------
     # 8) Insert 5 clean blank lines UNDER header
@@ -1008,44 +1019,29 @@ def run_pipeline(ref_file, trans_file, reviewer_file, docx_files):
     results_df = pd.DataFrame(results)
 
     # Build Excel bytes
-    assignments_buffer = BytesIO()
-    assignments_df.to_excel(assignments_buffer, index=False)
-    assignments_buffer.seek(0)
+    # ---- WRITE LARGE OUTPUTS TO DISK (NOT RAM) ----
+    out_dir = ensure_output_dir()
 
-    # Build ZIP bytes with processed docs
-    zip_buffer = BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w") as zf:
+    # 1) Assignments Excel to disk
+    assignments_path = out_dir / "reviewer_assignments.xlsx"
+    assignments_df.to_excel(assignments_path, index=False)
+
+    # 2) Processed abstracts zip to disk
+    processed_zip_path = out_dir / "processed_abstracts.zip"
+    with zipfile.ZipFile(processed_zip_path, "w") as zf:
         for f in output_dir.iterdir():
             zf.write(f, arcname=f.name)
-    zip_buffer.seek(0)
-    
-    # --- NEW: Create reviewer DOCX packets ---
-    reviewer_docx_zip_buffer = BytesIO()
-    reviewer_docx_temp = workdir / "reviewer_packets_docx.zip"
-    
-    create_reviewer_docx_packets(assignments_df, output_dir, reviewer_docx_temp)
-    
-    with open(reviewer_docx_temp, "rb") as f:
-        reviewer_docx_zip_buffer.write(f.read())
-    reviewer_docx_zip_buffer.seek(0)
-        
-    # # --- NEW: Create reviewer PDF packets ---
-    # reviewer_pdf_zip_buffer = BytesIO()
-    # reviewer_pdf_temp = workdir / "reviewer_packets_pdf.zip"
-    
-    # create_reviewer_pdf_packets(assignments_df, output_dir, reviewer_pdf_temp)
-    
-    # # Load into memory
-    # with open(reviewer_pdf_temp, "rb") as f:
-    #     reviewer_pdf_zip_buffer.write(f.read())
-    # reviewer_pdf_zip_buffer.seek(0)
-    
+
+    # 3) Reviewer packets zip to disk
+    reviewer_doc_zip_path = out_dir / "reviewer_merged_packets_doc.zip"
+    create_reviewer_docx_packets(assignments_df, output_dir, reviewer_doc_zip_path)
+
     return (
         assignments_df,
         results_df,
-        assignments_buffer,
-        zip_buffer,
-        reviewer_docx_zip_buffer,
+        str(assignments_path),
+        str(processed_zip_path),
+        str(reviewer_doc_zip_path),
     )
 
 # =========================
@@ -1090,9 +1086,10 @@ with st.sidebar:
 if "assignments_df" not in st.session_state:
     st.session_state["assignments_df"] = None
     st.session_state["results_df"] = None
-    st.session_state["assignments_bytes"] = None
-    st.session_state["zip_bytes"] = None
-    st.session_state["reviewer_doc_zip_bytes"] = None  # <-- MISSING ONE
+    st.session_state["assignments_path"] = None
+    st.session_state["zip_path"] = None
+    st.session_state["reviewer_doc_zip_path"] = None
+    st.session_state["output_dir"] = None
 
 if run_btn:
     if not (ref_file and trans_file and reviewer_file and docx_files):
@@ -1103,16 +1100,16 @@ if run_btn:
                 (
                     assignments_df,
                     results_df,
-                    assignments_bytes,
-                    zip_bytes,
-                    reviewer_doc_zip_bytes,
+                    assignments_path,
+                    zip_path,
+                    reviewer_doc_zip_path,
                 ) = run_pipeline(ref_file, trans_file, reviewer_file, docx_files)
-
+                
                 st.session_state["assignments_df"] = assignments_df
                 st.session_state["results_df"] = results_df
-                st.session_state["assignments_bytes"] = assignments_bytes
-                st.session_state["zip_bytes"] = zip_bytes
-                st.session_state["reviewer_doc_zip_bytes"] = reviewer_doc_zip_bytes
+                st.session_state["assignments_path"] = assignments_path
+                st.session_state["zip_path"] = zip_path
+                st.session_state["reviewer_doc_zip_path"] = reviewer_doc_zip_path
                 st.success("Processing complete!")
             except Exception as e:
                 st.error(f"Error during processing: {e}")
@@ -1128,29 +1125,28 @@ if st.session_state["assignments_df"] is not None:
 
     col1, col2,col3 = st.columns(3)
     with col1:
-        st.download_button(
-            "Download assignments (Excel)",
-            data=st.session_state["assignments_bytes"],
-            file_name="reviewer_assignments.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+        with open(st.session_state["assignments_path"], "rb") as f:
+            st.download_button(
+                "Download assignments (Excel)",
+                data=f,
+                file_name="reviewer_assignments.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+    
     with col2:
-        st.download_button(
-            "Download processed abstracts (ZIP)",
-            data=st.session_state["zip_bytes"],
-            file_name="processed_abstracts.zip",
-            mime="application/zip",
-        )
+        with open(st.session_state["zip_path"], "rb") as f:
+            st.download_button(
+                "Download processed abstracts (ZIP)",
+                data=f,
+                file_name="processed_abstracts.zip",
+                mime="application/zip",
+            )
+    
     with col3:
-        st.download_button(
-            "Download reviewer packets (DOC ZIP)",
-            data=st.session_state["reviewer_doc_zip_bytes"],
-            file_name="reviewer_merged_packets_doc.zip",
-            mime="application/zip",
-        )
-
-
-
-
-
-
+        with open(st.session_state["reviewer_doc_zip_path"], "rb") as f:
+            st.download_button(
+                "Download reviewer packets (DOC ZIP)",
+                data=f,
+                file_name="reviewer_merged_packets_doc.zip",
+                mime="application/zip",
+            )
