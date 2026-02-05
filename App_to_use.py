@@ -87,7 +87,7 @@ def ensure_output_dir():
     Create (once) a stable temp output directory for this Streamlit session.
     Prevents RAM blowups by keeping large zips on disk.
     """
-    if "output_dir" not in st.session_state:
+    if not st.session_state.get("output_dir"):
         st.session_state["output_dir"] = tempfile.mkdtemp(prefix="srd_streamlit_")
     return Path(st.session_state["output_dir"])
 
@@ -1116,7 +1116,14 @@ if run_btn:
 
 
 # Show outputs if available
-if st.session_state["assignments_df"] is not None:
+ready = (
+    st.session_state.get("assignments_df") is not None
+    and st.session_state.get("results_df") is not None
+    and st.session_state.get("assignments_path")
+    and st.session_state.get("zip_path")
+    and st.session_state.get("reviewer_doc_zip_path")
+)
+if ready:
     st.subheader("Reviewer assignments")
     st.dataframe(st.session_state["assignments_df"], use_container_width=True)
 
@@ -1150,3 +1157,4 @@ if st.session_state["assignments_df"] is not None:
                 file_name="reviewer_merged_packets_doc.zip",
                 mime="application/zip",
             )
+
