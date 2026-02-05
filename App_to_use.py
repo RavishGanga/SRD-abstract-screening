@@ -82,12 +82,103 @@ from docx.shared import Pt
 
 #     return out_zip_path
 
+
+
+def recompress_docx_inplace(docx_path: str | Path, remove_thumbnail: bool = True) -> Path:
+    """
+    Re-compress a .docx file without changing its visible content.
+
+    What it does:
+      - Reads the DOCX as a zip
+      - Writes a new zip with ZIP_DEFLATED compression (smaller)
+      - Optionally removes docProps/thumbnail.jpeg (not part of the document content)
+
+    What it does NOT do:
+      - It does not edit any XML, text, styles, images, or relationships
+      - It does not downsample images
+      - It does not alter the document layout/content
+
+    Returns:
+      Path to the recompressed docx (same path, in-place).
+    """
+    docx_path = Path(docx_path)
+
+    if docx_path.suffix.lower() != ".docx":
+        raise ValueError(f"Expected a .docx file, got: {docx_path}")
+
+    if not docx_path.exists():
+        raise FileNotFoundError(docx_path)
+
+    # Create temp output in same directory (safe replace)
+    tmp_path = docx_path.with_suffix(".recompressed.tmp")
+
+    # Choose compression
+    compression = zipfile.ZIP_DEFLATED
+
+    # compresslevel is available on Python 3.7+ for ZipFile
+    zip_kwargs = {"compression": compression}
+    try:
+        zip_kwargs["compresslevel"] = 9
+    except TypeError:
+        # Older Python: ignore compresslevel
+        pass
+
+    with zipfile.ZipFile(docx_path, "r") as zin:
+        # Validate it is a DOCX-like zip
+        names = zin.namelist()
+        if "[Content_Types].xml" not in names or "word/document.xml" not in names:
+            raise ValueError("This file doesn't look like a valid DOCX.")
+
+        with zipfile.ZipFile(tmp_path, "w", **zip_kwargs) as zout:
+            for info in zin.infolist():
+                name = info.filename
+
+                # Thumbnail is not document content (Word preview image)
+                if remove_thumbnail and name.lower() == "docprops/thumbnail.jpeg":
+                    continue
+
+                data = zin.read(name)
+
+                # Preserve timestamps/metadata as much as ZipInfo allows
+                new_info = zipfile.ZipInfo(filename=name, date_time=info.date_time)
+                new_info.compress_type = compression
+                new_info.external_attr = info.external_attr
+                new_info.internal_attr = info.internal_attr
+                new_info.flag_bits = info.flag_bits
+
+                # Keep original "stored vs deflated" isn't needed; we always deflate for size
+                zout.writestr(new_info, data)
+
+    # Atomic-ish replace
+    tmp_path.replace(docx_path)
+    return docx_path
+
+
+def recompress_all_docx_in_folder(folder: str | Path, remove_thumbnail: bool = True) -> tuple[int, int]:
+    """
+    Recompress all .docx files in a folder in place.
+    Returns (processed_count, failed_count).
+    """
+    folder = Path(folder)
+    processed = 0
+    failed = 0
+
+    for p in folder.glob("*.docx"):
+        try:
+            recompress_docx_inplace(p, remove_thumbnail=remove_thumbnail)
+            processed += 1
+        except Exception:
+            failed += 1
+
+    return processed, failed
+
+
 def ensure_output_dir():
     """
     Create (once) a stable temp output directory for this Streamlit session.
     Prevents RAM blowups by keeping large zips on disk.
     """
-    if not st.session_state.get("output_dir"):
+    if "output_dir" not in st.session_state:
         st.session_state["output_dir"] = tempfile.mkdtemp(prefix="srd_streamlit_")
     return Path(st.session_state["output_dir"])
 
@@ -265,7 +356,12 @@ def create_reviewer_docx_packets(assignments_df, processed_dir, out_zip_path):
         reviewer_packets[reviewer] = out_path
 
     # ZIP the packets
-    with zipfile.ZipFile(out_zip_path, "w") as zf:
+    with zipfile.ZipFile(
+    out_zip_path,
+    "w",
+    compression=zipfile.ZIP_DEFLATED,
+    compresslevel=9,
+    ) as zf:
         for reviewer, docx_file in reviewer_packets.items():
             zf.write(docx_file, arcname=docx_file.name)
 
@@ -793,6 +889,8 @@ def process_doc(filepath, ref_df, output_folder, remaining_ids):
         doc = Document(filepath)
         out_path = Path(output_folder) / (Path(filepath).stem + "_unchanged.docx")
         doc.save(out_path)
+        # NEW: recompress the saved DOCX (no content/layout changes)
+        recompress_docx_inplace(out_path)
         return {
             "file": Path(filepath).name,
             "name": None,
@@ -1028,7 +1126,12 @@ def run_pipeline(ref_file, trans_file, reviewer_file, docx_files):
 
     # 2) Processed abstracts zip to disk
     processed_zip_path = out_dir / "processed_abstracts.zip"
-    with zipfile.ZipFile(processed_zip_path, "w") as zf:
+    with zipfile.ZipFile(
+    processed_zip_path,
+    "w",
+    compression=zipfile.ZIP_DEFLATED,
+    compresslevel=9,
+    ) as zf:
         for f in output_dir.iterdir():
             zf.write(f, arcname=f.name)
 
@@ -1116,14 +1219,7 @@ if run_btn:
 
 
 # Show outputs if available
-ready = (
-    st.session_state.get("assignments_df") is not None
-    and st.session_state.get("results_df") is not None
-    and st.session_state.get("assignments_path")
-    and st.session_state.get("zip_path")
-    and st.session_state.get("reviewer_doc_zip_path")
-)
-if ready:
+if st.session_state["assignments_df"] is not None:
     st.subheader("Reviewer assignments")
     st.dataframe(st.session_state["assignments_df"], use_container_width=True)
 
@@ -1157,4 +1253,3 @@ if ready:
                 file_name="reviewer_merged_packets_doc.zip",
                 mime="application/zip",
             )
-
