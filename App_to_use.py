@@ -30,7 +30,7 @@ def get_session_dir():
         st.session_state["session_work_dir"] = temp_dir
     return Path(st.session_state["session_work_dir"])
 
-def split_files_to_disk(files, out_dir, base_name, max_part_mb=50):
+def split_files_to_disk(files, out_dir, base_name, max_part_mb=40):
     """Splits files into ZIP parts on DISK (low RAM usage)."""
     out_dir = Path(out_dir)
     files = sorted([Path(f) for f in files if Path(f).is_file()], key=lambda p: p.name.lower())
@@ -536,7 +536,7 @@ def build_remaining_ids_dict(ref_df):
 #  3. MAIN PIPELINE
 # ==========================================
 
-def run_pipeline(ref_file, trans_file, reviewer_file, docx_files, max_part_mb=80):
+def run_pipeline(ref_file, trans_file, reviewer_file, docx_files, max_part_mb=40):
     work_dir = get_session_dir()
     input_dir, output_dir, final_dir = work_dir/"input", work_dir/"output", work_dir/"final_zips"
     
@@ -616,7 +616,7 @@ if run_btn:
             try:
                 # Run logic
                 assignments_df, results_df, assign_path, abs_parts, rev_parts = run_pipeline(
-                    ref_file, trans_file, reviewer_file, docx_files, max_part_mb=80
+                    ref_file, trans_file, reviewer_file, docx_files, max_part_mb=40
                 )
                 
                 st.session_state['processed'] = True
@@ -700,4 +700,5 @@ if st.session_state.get('processed'):
                 )
         else:
             st.error("File not found on server. The session may have expired.")
+
 
