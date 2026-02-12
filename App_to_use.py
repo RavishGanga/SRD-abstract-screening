@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 SRD Abstracts – Reviewer Assignment & DOCX Processor
-Final Version: Original Logic + Stable Downloads + Vertical Layout
+Fixed: Removes "Author"/"Authors" from names properly.
 """
 
 import streamlit as st
@@ -66,7 +66,7 @@ def split_files_to_disk(files, out_dir, base_name, max_part_mb=80):
     return parts
 
 # ==========================================
-#  2. ORIGINAL HELPER FUNCTIONS (RESTORED)
+#  2. HELPER FUNCTIONS
 # ==========================================
 
 def recompress_docx_inplace(docx_path: str | Path, remove_thumbnail: bool = True) -> Path:
@@ -229,12 +229,11 @@ def remove_titles(name):
     clean = re.sub(r"\s+", " ", clean).strip()
     return clean
 
-# --- ORIGINAL COMPLEX AUTHOR MATCHING LOGIC ---
+# --- MATCHING LOGIC ---
 
 def match_author_name(input_name, ref_df, ref_col="name"):
     if pd.isna(input_name) or len(str(input_name).strip()) < 2: return None
     s = str(input_name).strip()
-    # Normalize formats
     s = re.sub(r",\s*", " ", s)
     s = re.sub(r"\s*\.\s*([A-Za-z])\b", r" \1", s)
     s = re.sub(r"\s+", " ", s).strip()
@@ -266,7 +265,7 @@ def match_author_name(input_name, ref_df, ref_col="name"):
                 if cand_init:
                     if cand_init == in_initials: score += 200
                     elif cand_init[0] == in_initials[0]: score += 100
-                    else: score -= 200 # Mismatch penalty
+                    else: score -= 200
                     score += fuzz.ratio(cand_init, in_initials)
             score += int(0.5 * fuzz.partial_ratio(s_lower, c.lower()))
             if score > best_score:
@@ -275,7 +274,6 @@ def match_author_name(input_name, ref_df, ref_col="name"):
     
     if best_match and best_score >= 150: return best_match
     
-    # 3) Fuzzy Fallbacks
     match = process.extractOne(s, candidates, scorer=fuzz.partial_ratio)
     if match and match[1] >= 85: return match[0]
     return None
@@ -358,6 +356,8 @@ def prepare_ref_and_authors(ref_file, trans_file):
     authors = ref_merged.groupby(["name", "abstract_id"])["English"].apply(lambda x: list(set(x.dropna()))).reset_index().rename(columns={"English": "departments"})
     return ref_df, authors
 
+# --- PROCESS DOC (FIXED AUTHOR EXTRACTION) ---
+
 def process_doc(filepath, ref_df, output_folder, remaining_ids):
     txt = extract_docx_text_with_superscripts(filepath)
     def find_line(phrase):
@@ -376,9 +376,15 @@ def process_doc(filepath, ref_df, output_folder, remaining_ids):
         return {"file": Path(filepath).name, "matched": False}
 
     def extract_first_author(idx):
-        line = txt[idx].replace("Authors:", "").replace("Author:", "").strip()
+        # FIX: Regex remove "Author" or "Authors" at start of string (with or without colon)
+        line = txt[idx]
+        line = re.sub(r"^\s*Authors?[:\s]*", "", line, flags=re.IGNORECASE).strip()
+        
         if line and not line.lower().startswith("affiliation"):
-            return re.sub(r"\d+$", "", re.split(r"[;,&]", line)[0].strip()).strip()
+            # Split by common delimiters and remove trailing numbers/digits
+            first_part = re.split(r"[;,&]", line)[0].strip()
+            return re.sub(r"\d+$", "", first_part).strip()
+            
         for i in range(idx + 1, len(txt)):
             cand = txt[i].strip()
             if not cand: continue
@@ -402,7 +408,7 @@ def process_doc(filepath, ref_df, output_folder, remaining_ids):
     if research_idx is None:
         out = Path(output_folder) / (Path(filepath).stem + "_unchanged.docx")
         doc.save(out)
-        return {"file": Path(filepath).name, "name": name, "matched": abstract_nr is not None}
+        return {"file": Path(filepath).name, "name": name, "matched_name": matched_name, "abstract_nr": abstract_nr, "matched": abstract_nr is not None}
 
     for _ in range(research_idx):
         p = doc.paragraphs[1]
@@ -412,16 +418,17 @@ def process_doc(filepath, ref_df, output_folder, remaining_ids):
     clean_whitespace(doc)
 
     if abstract_nr is not None:
-        p = doc.add_paragraph()
-        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        run = p.add_run(f"Abstract number: {abstract_nr}")
+        title_p = doc.paragraphs[0]
+        p_label = doc.add_paragraph()
+        p_label.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run = p_label.add_run(f"Abstract number: {abstract_nr}")
         run.bold = True
         run.font.color.rgb = RGBColor(255, 0, 0)
         doc._element.body.remove(p._p)
         doc.paragraphs[0]._p.addnext(p._p)
 
     for _ in range(5): doc._element.body.insert(1, OxmlElement("w:p"))
-    force_document_font(doc)
+    force_document_font(doc, font_name="Arial", font_size=12)
 
     fname = f"srd_abstract_{abstract_nr}.docx" if abstract_nr else Path(filepath).stem + "_no_number.docx"
     out = Path(output_folder) / fname
@@ -466,7 +473,6 @@ def run_pipeline(ref_file, trans_file, reviewer_file, docx_files, max_part_mb=80
     try:
         reviewer_df = read_excel_with_auto_header_from_bytes(reviewer_bytes, sheet_name="Reviewers")
     except ValueError:
-        # Fallback to first sheet if "Reviewers" tab is missing
         reviewer_df = read_excel_with_auto_header_from_bytes(reviewer_bytes, sheet_name=0)
     
     reviewer_df.columns = reviewer_df.columns.str.lower().str.strip()
