@@ -269,12 +269,10 @@ def fuzzy_merge(df1, df2, key1, key2, threshold=90):
             matches.append({**row.to_dict(), **matched_row.to_dict()})
     return pd.DataFrame(matches)
 
-def read_excel_with_auto_header_from_bytes(data: bytes, sheet_name=0):
-    """Your original auto-header function, adapted for in-memory bytes."""
+def read_excel_auto_header(data: bytes, sheet_name=0):
     temp = pd.read_excel(BytesIO(data), sheet_name=sheet_name, header=None)
     header_row = temp.notna().any(axis=1).idxmax()
-    df = pd.read_excel(BytesIO(data), sheet_name=sheet_name, header=header_row)
-    return df
+    return pd.read_excel(BytesIO(data), sheet_name=sheet_name, header=header_row)
 
 def extract_ids(x):
     nums = re.findall(r"\d+", str(x))
@@ -436,9 +434,23 @@ def run_pipeline(ref_file, trans_file, reviewer_file, docx_files, max_part_mb=80
     ref_df, authors = prepare_ref_and_authors(ref_file, trans_file)
     remaining_ids = build_ids(ref_df)
     
-    reviewer_df = read_excel_with_auto_header_from_bytes(reviewer_file.getvalue())
+    # --- FIX: Specifying sheet_name="Reviewers" ---
+    try:
+        reviewer_df = read_excel_auto_header(reviewer_file.getvalue(), sheet_name="Reviewers")
+    except ValueError:
+        # Fallback: If "Reviewers" sheet doesn't exist, try the first sheet
+        reviewer_df = read_excel_auto_header(reviewer_file.getvalue(), sheet_name=0)
+
     reviewer_df.columns = reviewer_df.columns.str.lower().str.strip()
+    
+    # Rename columns
     reviewer_df = reviewer_df.rename(columns={"reviewer signup": "reviewer_name", "department": "reviewer_department"})
+    
+    # --- SAFETY CHECK: Ensure the column exists ---
+    if "reviewer_name" not in reviewer_df.columns:
+        found_cols = ", ".join(reviewer_df.columns.tolist())
+        raise ValueError(f"Could not find 'Reviewer Signup' column in the Reviewers Excel. Found columns: {found_cols}")
+
     reviewer_df["assigned_count"] = 0
     reviewer_df = reviewer_df.dropna(subset=["reviewer_name"])
     
@@ -458,7 +470,6 @@ def run_pipeline(ref_file, trans_file, reviewer_file, docx_files, max_part_mb=80
     assignments_df.to_excel(assign_path, index=False)
 
     return assignments_df, pd.DataFrame(results), assign_path, abs_parts, rev_parts
-
 # ==========================================
 #  4. STREAMLIT UI
 # ==========================================
