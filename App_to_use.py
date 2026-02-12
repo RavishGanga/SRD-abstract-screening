@@ -30,7 +30,7 @@ def get_session_dir():
         st.session_state["session_work_dir"] = temp_dir
     return Path(st.session_state["session_work_dir"])
 
-def split_files_to_disk(files, out_dir, base_name, max_part_mb=80):
+def split_files_to_disk(files, out_dir, base_name, max_part_mb=50):
     """Splits files into ZIP parts on DISK (low RAM usage)."""
     out_dir = Path(out_dir)
     files = sorted([Path(f) for f in files if Path(f).is_file()], key=lambda p: p.name.lower())
@@ -700,3 +700,4 @@ if st.session_state.get('processed'):
                 )
         else:
             st.error("File not found on server. The session may have expired.")
+
