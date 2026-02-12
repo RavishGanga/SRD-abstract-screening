@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 SRD Abstracts – Reviewer Assignment & DOCX Processor
-Optimized for Stability and Low RAM Usage.
+Final Version: Original Logic + Stable Downloads + Vertical Layout
 """
 
 import streamlit as st
@@ -66,7 +66,7 @@ def split_files_to_disk(files, out_dir, base_name, max_part_mb=80):
     return parts
 
 # ==========================================
-#  2. ORIGINAL HELPER FUNCTIONS
+#  2. ORIGINAL HELPER FUNCTIONS (RESTORED)
 # ==========================================
 
 def recompress_docx_inplace(docx_path: str | Path, remove_thumbnail: bool = True) -> Path:
@@ -198,39 +198,62 @@ def find_first_marker(doc):
     return None
 
 def extract_surname(name):
+    TITLE_PATTERNS = [r"\bMD\b", r"\bM\.D\.\b", r"\bPhD\b", r"\bP\.h\.D\.\b", r"\bMSc\b", r"\bBSc\b", r"\bMBA\b", r"\bMPH\b", r"\bDr\b", r"\bDr.\b", r"\bProf\b", r"\bProf.\b"]
+    DUTCH_PREFIXES = {"van", "de", "der", "den", "het", "ter", "ten", "van de", "van der", "van den"}
     if not isinstance(name, str): return None
-    clean = re.sub(r"\b(MD|PhD|MSc|BSc|Dr|Prof|Ing|MBA|MPH)\b\.?", "", re.sub(r"[\d\^]+$", "", name.strip()), flags=re.I).strip()
+    clean = name.strip()
+    clean = re.sub(r"\^.*$", "", clean)
+    clean = re.sub(r"\d+$", "", clean).strip()
+    for pattern in TITLE_PATTERNS:
+        clean = re.sub(pattern, "", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"\s+", " ", clean).strip()
     parts = clean.split()
     if not parts: return None
     if len(parts) == 1: return parts[0].lower()
     last_two = " ".join(parts[-2:]).lower()
-    if last_two in {"van", "de", "der", "den", "het", "ter", "ten", "van de", "van der", "van den"}: return last_two
+    if last_two in DUTCH_PREFIXES: return last_two
     return parts[-1].lower()
 
 def extract_initials(name):
     if not isinstance(name, str): return None
-    name = re.sub(r"\b(MD|PhD|MSc|BSc|Dr|Prof|Ing|MBA|MPH)\b\.?", "", name, flags=re.I).strip()
+    name = remove_titles(name).strip()
     dotted = re.findall(r"([A-Za-z])\.", name)
     if dotted: return "".join(d.upper() for d in dotted)
     return "".join(t[0].upper() for t in re.split(r"[ \-]+", name) if t and t[0].isalpha())
 
+def remove_titles(name):
+    TITLES = {r"\bMD\b", r"\bM\.D\.\b", r"\bPhD\b", r"\bP\.h\.D\.\b", r"\bMSc\b", r"\bBSc\b", r"\bDr\b", r"\bDr.\b", r"\bProf\b", r"\bProf.\b", r"\bIng\b", r"\bir\.\b", r"\bMBA\b", r"\bMPH\b"}
+    if not isinstance(name, str): return name
+    clean = name
+    for t in TITLES: clean = re.sub(t, "", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"\s+", " ", clean).strip()
+    return clean
+
+# --- ORIGINAL COMPLEX AUTHOR MATCHING LOGIC ---
+
 def match_author_name(input_name, ref_df, ref_col="name"):
     if pd.isna(input_name) or len(str(input_name).strip()) < 2: return None
-    s = str(input_name).strip().replace(",", " ")
+    s = str(input_name).strip()
+    # Normalize formats
+    s = re.sub(r",\s*", " ", s)
+    s = re.sub(r"\s*\.\s*([A-Za-z])\b", r" \1", s)
     s = re.sub(r"\s+", " ", s).strip()
-    candidates = [str(c).strip() for c in ref_df[ref_col].dropna().unique()]
-    
-    for c in candidates:
-        if c.lower() == s.lower(): return c
-
-    hypotheses = [(extract_surname(s), extract_initials(s))]
+    s_lower = s.lower()
     tokens = s.split()
+    candidates = [str(c).strip() for c in ref_df[ref_col].dropna().unique()]
+
+    # 1) Exact match
+    for c in candidates:
+        if c.lower() == s_lower: return c
+
+    # 2) Hypothesis Generation
+    hypotheses = [(extract_surname(s), extract_initials(s))]
     if len(tokens) == 2 and re.fullmatch(r"[A-Za-z]\.?", tokens[1]):
         hypotheses.append((tokens[0].lower(), tokens[1].replace(".", "").upper()))
 
     best_match = None
-    best_score = 0
-    
+    best_score = -10**9
+
     for in_surname, in_initials in hypotheses:
         if not in_surname: continue
         same_surname = [c for c in candidates if extract_surname(c) == in_surname]
@@ -243,13 +266,16 @@ def match_author_name(input_name, ref_df, ref_col="name"):
                 if cand_init:
                     if cand_init == in_initials: score += 200
                     elif cand_init[0] == in_initials[0]: score += 100
+                    else: score -= 200 # Mismatch penalty
                     score += fuzz.ratio(cand_init, in_initials)
-            score += int(0.5 * fuzz.partial_ratio(s.lower(), c.lower()))
+            score += int(0.5 * fuzz.partial_ratio(s_lower, c.lower()))
             if score > best_score:
                 best_score = score
                 best_match = c
     
     if best_match and best_score >= 150: return best_match
+    
+    # 3) Fuzzy Fallbacks
     match = process.extractOne(s, candidates, scorer=fuzz.partial_ratio)
     if match and match[1] >= 85: return match[0]
     return None
@@ -371,17 +397,18 @@ def process_doc(filepath, ref_df, output_folder, remaining_ids):
 
     doc = Document(filepath)
     res = find_first_marker(doc)
-    
-    if not res:
+    research_idx = res["paragraph_index"] if res else None
+
+    if research_idx is None:
         out = Path(output_folder) / (Path(filepath).stem + "_unchanged.docx")
         doc.save(out)
         return {"file": Path(filepath).name, "name": name, "matched": abstract_nr is not None}
 
-    # Cut top
-    for _ in range(res["paragraph_index"]):
+    for _ in range(research_idx):
         p = doc.paragraphs[1]
         p._element.getparent().remove(p._element)
     
+    body = doc._element.body
     clean_whitespace(doc)
 
     if abstract_nr is not None:
@@ -434,16 +461,19 @@ def run_pipeline(ref_file, trans_file, reviewer_file, docx_files, max_part_mb=80
     ref_df, authors = prepare_ref_and_authors(ref_file, trans_file)
     remaining_ids = build_ids(ref_df)
     
+    # --- ERROR FIX: SAFE EXCEL LOADING ---
     reviewer_bytes = reviewer_file.getvalue()
     try:
         reviewer_df = read_excel_with_auto_header_from_bytes(reviewer_bytes, sheet_name="Reviewers")
     except ValueError:
+        # Fallback to first sheet if "Reviewers" tab is missing
         reviewer_df = read_excel_with_auto_header_from_bytes(reviewer_bytes, sheet_name=0)
     
     reviewer_df.columns = reviewer_df.columns.str.lower().str.strip()
     reviewer_df = reviewer_df.rename(columns={"reviewer signup": "reviewer_name", "department": "reviewer_department"})
-    reviewer_df["assigned_count"] = 0
+    reviewer_df["reviewer_department"] = reviewer_df["reviewer_department"].astype(str).str.strip()
     reviewer_df = reviewer_df.dropna(subset=["reviewer_name"])
+    reviewer_df["assigned_count"] = 0
     
     assignments_df, _ = assign_reviewers(authors, reviewer_df)
 
@@ -453,7 +483,8 @@ def run_pipeline(ref_file, trans_file, reviewer_file, docx_files, max_part_mb=80
         results.append(process_doc(str(fpath), ref_df, str(output_dir), remaining_ids))
     
     # Create ZIPs
-    abs_parts = split_files_to_disk(list(output_dir.glob("*.docx")), final_dir, "Abstracts", max_part_mb)
+    abs_files = list(output_dir.glob("srd_abstract_*.docx")) + list(output_dir.glob("*_no_number.docx"))
+    abs_parts = split_files_to_disk(abs_files, final_dir, "Abstracts", max_part_mb)
     rev_docs = create_reviewer_docx_packets_files(assignments_df, output_dir)
     rev_parts = split_files_to_disk(rev_docs, final_dir, "ReviewerPackets", max_part_mb)
 
@@ -494,6 +525,7 @@ if run_btn:
     else:
         with st.spinner("Processing... This may take a minute."):
             try:
+                # Run logic
                 assignments_df, results_df, assign_path, abs_parts, rev_parts = run_pipeline(
                     ref_file, trans_file, reviewer_file, docx_files, max_part_mb=80
                 )
@@ -513,7 +545,7 @@ if run_btn:
 if st.session_state.get('processed'):
     st.divider()
     
-    # TABLE 1: Assignments
+    # TABLE 1: Assignments (Vertical Layout)
     st.subheader("Assignments")
     if st.session_state['assignments_df'] is not None:
         st.dataframe(st.session_state['assignments_df'], height=300, use_container_width=True)
@@ -530,7 +562,7 @@ if st.session_state.get('processed'):
 
     st.divider()
 
-    # TABLE 2: Log
+    # TABLE 2: Log (Vertical Layout)
     st.subheader("Processing Log")
     if st.session_state['results_df'] is not None:
         st.dataframe(st.session_state['results_df'], height=300, use_container_width=True)
@@ -555,6 +587,7 @@ if st.session_state.get('processed'):
     *Downloading one by one ensures the server does not crash.*
     """)
 
+    # Dropdown Logic
     all_parts = st.session_state['abs_parts'] + st.session_state['rev_parts']
     parts_map = {Path(p).name: p for p in all_parts}
     options = list(parts_map.keys())
@@ -567,6 +600,7 @@ if st.session_state.get('processed'):
         
         if full_path.exists():
             file_size_mb = round(full_path.stat().st_size / (1024 * 1024), 2)
+            # Open file ONLY when button is rendered/clicked
             with open(full_path, "rb") as f:
                 st.download_button(
                     label=f"⬇️ Download {selected_file_name} ({file_size_mb} MB)",
