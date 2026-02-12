@@ -436,7 +436,7 @@ def run_pipeline(ref_file, trans_file, reviewer_file, docx_files, max_part_mb=80
     ref_df, authors = prepare_ref_and_authors(ref_file, trans_file)
     remaining_ids = build_ids(ref_df)
     
-    reviewer_df = read_excel_auto_header(reviewer_file.getvalue())
+    reviewer_df = read_excel_with_auto_header_from_bytes(reviewer_file.getvalue())
     reviewer_df.columns = reviewer_df.columns.str.lower().str.strip()
     reviewer_df = reviewer_df.rename(columns={"reviewer signup": "reviewer_name", "department": "reviewer_department"})
     reviewer_df["assigned_count"] = 0
