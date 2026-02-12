@@ -636,29 +636,27 @@ if run_btn:
 if st.session_state.get('processed'):
     st.divider()
     
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("Assignments")
-        # Display the Assignments Table
-        if st.session_state['assignments_df'] is not None:
-            st.dataframe(st.session_state['assignments_df'], height=300, use_container_width=True)
-        
-        # Download Button for Excel
-        if st.session_state.get('assign_path'):
-            path = Path(st.session_state['assign_path'])
-            if path.exists():
-                st.download_button(
-                    label="📊 Download Assignments Excel", 
-                    data=path.read_bytes(), 
-                    file_name="assignments.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+    # TABLE 1: Assignments
+    st.subheader("Assignments")
+    if st.session_state['assignments_df'] is not None:
+        st.dataframe(st.session_state['assignments_df'], height=300, use_container_width=True)
+    
+    if st.session_state.get('assign_path'):
+        path = Path(st.session_state['assign_path'])
+        if path.exists():
+            st.download_button(
+                label="📊 Download Assignments Excel", 
+                data=path.read_bytes(), 
+                file_name="assignments.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
 
-    with col2:
-        st.subheader("Processing Log")
-        # Display the Log Table
-        if st.session_state['results_df'] is not None:
-            st.dataframe(st.session_state['results_df'], height=300, use_container_width=True)
+    st.divider()
+
+    # TABLE 2: Log
+    st.subheader("Processing Log")
+    if st.session_state['results_df'] is not None:
+        st.dataframe(st.session_state['results_df'], height=300, use_container_width=True)
 
     st.divider()
 
@@ -680,7 +678,6 @@ if st.session_state.get('processed'):
     *Downloading one by one ensures the server does not crash.*
     """)
 
-    # Dropdown Logic
     all_parts = st.session_state['abs_parts'] + st.session_state['rev_parts']
     parts_map = {Path(p).name: p for p in all_parts}
     options = list(parts_map.keys())
@@ -693,7 +690,6 @@ if st.session_state.get('processed'):
         
         if full_path.exists():
             file_size_mb = round(full_path.stat().st_size / (1024 * 1024), 2)
-            # Open file ONLY when button is rendered/clicked
             with open(full_path, "rb") as f:
                 st.download_button(
                     label=f"⬇️ Download {selected_file_name} ({file_size_mb} MB)",
