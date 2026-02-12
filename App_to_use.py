@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 SRD Abstracts – Reviewer Assignment & DOCX Processor
-Fixed: Removes "Author"/"Authors" from names properly.
+Restored Original Matching Logic + Stable File Handling
 """
 
 import streamlit as st
@@ -10,7 +10,6 @@ import re
 from rapidfuzz import fuzz, process
 from docx import Document
 from docx.oxml import OxmlElement
-from io import BytesIO
 import tempfile
 from pathlib import Path
 import zipfile
@@ -21,7 +20,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK
 from docx.shared import Pt
 
 # ==========================================
-#  1. SESSION & FILE MANAGEMENT
+#  1. SESSION & FILE MANAGEMENT (STABILITY FIX)
 # ==========================================
 
 def get_session_dir():
@@ -66,51 +65,67 @@ def split_files_to_disk(files, out_dir, base_name, max_part_mb=80):
     return parts
 
 # ==========================================
-#  2. HELPER FUNCTIONS
+#  2. ORIGINAL LOGIC HELPER FUNCTIONS
 # ==========================================
 
 def recompress_docx_inplace(docx_path: str | Path, remove_thumbnail: bool = True) -> Path:
     docx_path = Path(docx_path)
-    if docx_path.suffix.lower() != ".docx": raise ValueError(f"Expected .docx: {docx_path}")
-    if not docx_path.exists(): raise FileNotFoundError(docx_path)
+    if docx_path.suffix.lower() != ".docx":
+        raise ValueError(f"Expected a .docx file, got: {docx_path}")
+    if not docx_path.exists():
+        raise FileNotFoundError(docx_path)
+
     tmp_path = docx_path.with_suffix(".recompressed.tmp")
-    with zipfile.ZipFile(docx_path, "r") as zin, zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zout:
+
+    with zipfile.ZipFile(docx_path, "r") as zin, zipfile.ZipFile(
+        tmp_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9
+    ) as zout:
         for item in zin.infolist():
             name = item.filename
-            if remove_thumbnail and name.lower() == "docprops/thumbnail.jpeg": continue
-            zout.writestr(name, zin.read(name))
+            if remove_thumbnail and name.lower() == "docprops/thumbnail.jpeg":
+                continue
+            data = zin.read(name)
+            zout.writestr(name, data)
+
     tmp_path.replace(docx_path)
     return docx_path
 
 def force_document_font(doc, font_name="Arial", font_size=12):
     try:
-        doc.styles["Normal"].font.name = font_name
-        doc.styles["Normal"].font.size = Pt(font_size)
-    except: pass
+        normal = doc.styles["Normal"]
+        normal.font.name = font_name
+        normal.font.size = Pt(font_size)
+    except:
+        pass
+
     for paragraph in doc.paragraphs:
         try:
             paragraph.style.font.name = font_name
             paragraph.style.font.size = Pt(font_size)
-        except: pass
+        except:
+            pass
         for run in paragraph.runs:
-            if not (bool(run._r.xpath(".//w:drawing")) or bool(run._r.xpath(".//w:pict"))):
-                run.font.size = Pt(font_size)
+            has_image = bool(run._r.xpath(".//w:drawing")) or bool(run._r.xpath(".//w:pict"))
+            if has_image: continue
+            run.font.size = Pt(font_size)
+
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 for paragraph in cell.paragraphs:
                     for run in paragraph.runs:
-                        if not (bool(run._r.xpath(".//w:drawing")) or bool(run._r.xpath(".//w:pict"))):
-                            run.font.name = font_name
-                            run.font.size = Pt(font_size)
+                        has_image = bool(run._r.xpath(".//w:drawing")) or bool(run._r.xpath(".//w:pict"))
+                        if has_image: continue
+                        run.font.name = font_name
+                        run.font.size = Pt(font_size)
 
 def clean_whitespace(doc):
     for p in list(doc.paragraphs):
         text = "".join(run.text for run in p.runs).strip()
-        has_img = bool(p._element.xpath(".//w:drawing")) or bool(p._element.xpath(".//w:pict"))
-        has_tbl = bool(p._element.xpath(".//w:tbl"))
-        has_br = any(run._r.xpath(".//w:br[@w:type='page']") for run in p.runs)
-        if text == "" and not (has_img or has_tbl or has_br):
+        has_image = bool(p._element.xpath(".//w:drawing")) or bool(p._element.xpath(".//w:pict"))
+        has_table = bool(p._element.xpath(".//w:tbl"))
+        has_pagebreak = any(run._r.xpath(".//w:br[@w:type='page']") for run in p.runs)
+        if text == "" and not (has_image or has_table or has_pagebreak):
             p._element.getparent().remove(p._element)
 
 def merge_docx_files(doc_paths, output_path, font_name="Arial", font_size=12):
@@ -118,21 +133,23 @@ def merge_docx_files(doc_paths, output_path, font_name="Arial", font_size=12):
     master = Document(doc_paths[0])
     composer = Composer(master)
     for doc_path in doc_paths[1:]:
-        master.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
+        p = master.add_paragraph()
+        p.add_run().add_break(WD_BREAK.PAGE)
         composer.append(Document(doc_path))
     composer.save(output_path)
-    merged = Document(output_path)
-    force_document_font(merged, font_name, font_size)
-    merged.save(output_path)
+    merged_doc = Document(output_path)
+    force_document_font(merged_doc, font_name, font_size)
+    merged_doc.save(output_path)
 
 def create_reviewer_docx_packets_files(assignments_df, processed_dir) -> list[Path]:
     processed_dir = Path(processed_dir)
     out_files = []
     for reviewer, group in assignments_df.groupby("reviewer_name"):
-        abstract_nums = sorted(group["abstract_id"].dropna().astype(int).tolist())
+        abstract_nums = group["abstract_id"].dropna().astype(int).tolist()
+        abstract_nums_sorted = sorted(abstract_nums)
         doc_paths = []
         filename_parts = []
-        for num in abstract_nums:
+        for num in abstract_nums_sorted:
             doc_path = processed_dir / f"srd_abstract_{num}.docx"
             if doc_path.exists():
                 doc_paths.append(doc_path)
@@ -148,13 +165,23 @@ def create_reviewer_docx_packets_files(assignments_df, processed_dir) -> list[Pa
         out_files.append(out_path)
     return out_files
 
+# --- RESTORED ORIGINAL CLEANING FUNCTIONS ---
+
 def clean_name(name):
     if name is None: return None
+    # 1. Remove superscripts like ^a, ^1, ^xyz
     name = re.sub(r"\^[A-Za-z0-9]+", "", name)
+    # 2. Remove a caret at the end (just "^")
     name = re.sub(r"\^$", "", name)
-    name = name.replace("^", "").replace("*", "")
+    # 3. Remove any remaining stray "^"
+    name = name.replace("^", "")
+    # Remove asterisks
+    name = name.replace("*", "")
+    # Remove footnote digits at end of name
     name = re.sub(r"\d+$", "", name)
-    return re.sub(r"\s+", " ", name).strip()
+    # Collapse extra spaces
+    name = re.sub(r"\s+", " ", name)
+    return name.strip()
 
 def extract_docx_text_with_superscripts(filepath):
     doc = Document(filepath)
@@ -162,11 +189,13 @@ def extract_docx_text_with_superscripts(filepath):
     for p in doc.paragraphs:
         line = ""
         for r in p.runs:
-            val = r._element.find(".//w:vertAlign", namespaces={"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"})
-            if val is not None and val.attrib.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val") == "superscript":
-                line += "^" + r.text
+            r_text = r.text
+            r_elem = r._element
+            vert_align = r_elem.find(".//w:vertAlign", namespaces={"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"})
+            if (vert_align is not None and vert_align.attrib.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val") == "superscript"):
+                line += "^" + r_text
             else:
-                line += r.text
+                line += r_text
         if line.strip(): lines.append(line.strip())
     return lines
 
@@ -185,16 +214,22 @@ def _looks_like_option_line(text: str) -> bool:
 
 def find_first_marker(doc):
     for tier_idx, tier in enumerate(MARKER_TIERS, start=1):
+        tier = [m.lower() for m in tier]
         for i, p in enumerate(doc.paragraphs):
-            low = p.text.strip().lower()
+            text = p.text.strip()
+            low = text.lower()
             if not low: continue
             for marker in tier:
-                if marker in low: return {"paragraph_index": i, "marker": marker, "tier": tier_idx}
+                if marker in low:
+                    return {"paragraph_index": i, "marker": marker, "tier": tier_idx, "text": text}
     for i, p in enumerate(doc.paragraphs):
-        low = p.text.strip().lower()
-        if not low or not _looks_like_option_line(p.text): continue
+        text = p.text.strip()
+        low = text.lower()
+        if not low: continue
+        if not _looks_like_option_line(text): continue
         for w in FALLBACK_WORDS:
-            if re.search(rf"\b{re.escape(w)}\b", low): return {"paragraph_index": i, "marker": w, "tier": 4}
+            if re.search(rf"\b{re.escape(w)}\b", low):
+                return {"paragraph_index": i, "marker": w, "tier": 4, "text": text}
     return None
 
 def extract_surname(name):
@@ -219,7 +254,11 @@ def extract_initials(name):
     name = remove_titles(name).strip()
     dotted = re.findall(r"([A-Za-z])\.", name)
     if dotted: return "".join(d.upper() for d in dotted)
-    return "".join(t[0].upper() for t in re.split(r"[ \-]+", name) if t and t[0].isalpha())
+    tokens = re.split(r"[ \-]+", name)
+    letters = []
+    for t in tokens:
+        if t and t[0].isalpha(): letters.append(t[0].upper())
+    return "".join(letters) if letters else None
 
 def remove_titles(name):
     TITLES = {r"\bMD\b", r"\bM\.D\.\b", r"\bPhD\b", r"\bP\.h\.D\.\b", r"\bMSc\b", r"\bBSc\b", r"\bDr\b", r"\bDr.\b", r"\bProf\b", r"\bProf.\b", r"\bIng\b", r"\bir\.\b", r"\bMBA\b", r"\bMPH\b"}
@@ -229,11 +268,12 @@ def remove_titles(name):
     clean = re.sub(r"\s+", " ", clean).strip()
     return clean
 
-# --- MATCHING LOGIC ---
+# --- RESTORED ORIGINAL MATCHING LOGIC ---
 
 def match_author_name(input_name, ref_df, ref_col="name"):
     if pd.isna(input_name) or len(str(input_name).strip()) < 2: return None
     s = str(input_name).strip()
+    # Normalize weird formats like "Ravish .N" / "Ravish,N" / "Ravish.N"
     s = re.sub(r",\s*", " ", s)
     s = re.sub(r"\s*\.\s*([A-Za-z])\b", r" \1", s)
     s = re.sub(r"\s+", " ", s).strip()
@@ -241,54 +281,84 @@ def match_author_name(input_name, ref_df, ref_col="name"):
     tokens = s.split()
     candidates = [str(c).strip() for c in ref_df[ref_col].dropna().unique()]
 
-    # 1) Exact match
+    # 1) Exact full-name match
     for c in candidates:
         if c.lower() == s_lower: return c
 
-    # 2) Hypothesis Generation
-    hypotheses = [(extract_surname(s), extract_initials(s))]
+    # Build hypotheses for (surname, initials)
+    hypotheses = []
+    # Hypothesis A: standard logic
+    hypotheses.append((extract_surname(s), extract_initials(s)))
+    # Hypothesis B: if looks like "Ravish N" or "Ravish N."
     if len(tokens) == 2 and re.fullmatch(r"[A-Za-z]\.?", tokens[1]):
-        hypotheses.append((tokens[0].lower(), tokens[1].replace(".", "").upper()))
+        hyp_surname = tokens[0].lower()
+        hyp_initials = tokens[1].replace(".", "").upper()
+        hypotheses.append((hyp_surname, hyp_initials))
 
-    best_match = None
-    best_score = -10**9
+    best_overall = None
+    best_overall_score = -10**9
 
     for in_surname, in_initials in hypotheses:
         if not in_surname: continue
+        # 2) Surname exact match filter
         same_surname = [c for c in candidates if extract_surname(c) == in_surname]
         if len(same_surname) == 1: return same_surname[0]
-        
-        for c in same_surname:
-            score = 0
-            if in_initials:
-                cand_init = extract_initials(c)
-                if cand_init:
-                    if cand_init == in_initials: score += 200
-                    elif cand_init[0] == in_initials[0]: score += 100
-                    else: score -= 200
-                    score += fuzz.ratio(cand_init, in_initials)
-            score += int(0.5 * fuzz.partial_ratio(s_lower, c.lower()))
+        # 3) Initial matching + tie-breaker
+        if same_surname:
+            for c in same_surname:
+                score = 0
+                if in_initials:
+                    cand_init = extract_initials(c)
+                    if cand_init:
+                        if cand_init[0] == in_initials[0]: score += 300
+                        else: score -= 200
+                        if cand_init == in_initials: score += 200
+                        if len(cand_init) == len(in_initials): score += 100
+                        score += fuzz.ratio(cand_init, in_initials)
+                score += int(0.5 * fuzz.partial_ratio(s_lower, c.lower()))
+                if score > best_overall_score:
+                    best_overall_score = score
+                    best_overall = c
+
+    if best_overall is not None and best_overall_score >= 150: return best_overall
+
+    # 4) Fuzzy surname fallback
+    best_surname = None
+    best_score = 0
+    for in_surname, _ in hypotheses:
+        if not in_surname: continue
+        for c in candidates:
+            score = fuzz.partial_ratio(in_surname, extract_surname(c))
             if score > best_score:
                 best_score = score
-                best_match = c
-    
-    if best_match and best_score >= 150: return best_match
-    
-    match = process.extractOne(s, candidates, scorer=fuzz.partial_ratio)
-    if match and match[1] >= 85: return match[0]
+                best_surname = c
+    if best_score >= 90: return best_surname
+
+    # 5) Fuzzy full-name fallback
+    best_match = None
+    best_score = 0
+    for c in candidates:
+        score = fuzz.partial_ratio(s_lower, c.lower())
+        if score > best_score:
+            best_score = score
+            best_match = c
+    if best_score >= 85: return best_match
     return None
 
-def fuzzy_merge(df1, df2, key1, key2, threshold=90):
+def fuzzy_merge(df1, df2, key1, key2, threshold=90, scorer=fuzz.partial_ratio):
     matches = []
     df2_clean = df2.dropna(subset=[key2]).copy()
     df2_clean[key2] = df2_clean[key2].astype(str)
-    for _, row in df1.iterrows():
+    for idx, row in df1.iterrows():
         val = row[key1]
         if pd.isna(val): continue
-        match = process.extractOne(str(val), df2_clean[key2].tolist(), scorer=fuzz.partial_ratio)
+        name = str(val)
+        match = process.extractOne(name, df2_clean[key2].tolist(), scorer=scorer)
         if match and match[1] >= threshold:
-            matched_row = df2_clean[df2_clean[key2] == match[0]].iloc[0]
-            matches.append({**row.to_dict(), **matched_row.to_dict()})
+            matched_name = match[0]
+            matched_row = df2_clean[df2_clean[key2] == matched_name].iloc[0]
+            combined = {**row.to_dict(), **matched_row.to_dict()}
+            matches.append(combined)
     return pd.DataFrame(matches)
 
 def read_excel_with_auto_header_from_bytes(data: bytes, sheet_name=0):
@@ -304,25 +374,26 @@ def extract_ids(x):
 
 def department_conflict(author_deps, reviewer_dep, threshold=85):
     if reviewer_dep is None: return False
-    rev_d = str(reviewer_dep).lower().strip()
-    for auth_d in author_deps:
-        if auth_d and fuzz.partial_ratio(str(auth_d).lower().strip(), rev_d) >= threshold: return True
+    reviewer_dep = str(reviewer_dep).lower().strip()
+    for dep in author_deps:
+        if dep is None: continue
+        dep = str(dep).lower().strip()
+        score = fuzz.partial_ratio(dep, reviewer_dep)
+        if score >= threshold: return True
     return False
 
 def assign_reviewers(authors, reviewers, max_reviews=8, reviewers_per_abs=3, conflict_threshold=85):
     assignments = []
-    for _, row in authors.iterrows():
+    for idx, row in authors.iterrows():
         author_name = row["name"]
         abstract_id = row["abstract_id"]
         author_deps = list(row["departments"])
-        
         mask = (reviewers["assigned_count"] < max_reviews) & (~reviewers["reviewer_department"].apply(lambda d: department_conflict(author_deps, d, threshold=conflict_threshold)))
         eligible = reviewers[mask]
-        
         if len(eligible) < reviewers_per_abs:
-            raise ValueError(f"Not enough reviewers for {author_name} (ID {abstract_id}). Needed {reviewers_per_abs}, found {len(eligible)}.")
-        
-        chosen = eligible.sort_values(by="assigned_count").head(reviewers_per_abs)
+            raise ValueError(f" Not enough eligible reviewers for {author_name} (abstract {abstract_id}). Needed {reviewers_per_abs}, but only {len(eligible)} are non-conflicting.")
+        eligible = eligible.sort_values(by="assigned_count", ascending=True)
+        chosen = eligible.head(reviewers_per_abs)
         for i, reviewer in chosen.iterrows():
             reviewers.loc[i, "assigned_count"] += 1
             assignments.append({
@@ -338,25 +409,25 @@ def assign_reviewers(authors, reviewers, max_reviews=8, reviewers_per_abs=3, con
 def prepare_ref_and_authors(ref_file, trans_file):
     trans_df = pd.read_excel(trans_file).drop_duplicates()
     ref_df = pd.read_excel(ref_file)
+    separators = r"[;,+/]+"
     ref_df.columns = ref_df.columns.str.lower().str.replace(" ", "_")
     
     for col in ["name", "department_", "abstract_nr._"]:
-        if col in ref_df.columns: ref_df[col] = ref_df[col].astype(str).str.strip()
+        if col in ref_df.columns:
+            ref_df[col] = ref_df[col].astype(str).str.strip()
     
     ref_df["department_"] = ref_df["department_"].replace("nan", "").fillna("")
-    ref_df["department"] = ref_df["department_"].str.split(r"[;,+/]+", regex=True)
+    ref_df["department"] = ref_df["department_"].str.split(separators, regex=True)
     ref_expanded = ref_df.explode("department")
     ref_expanded["department"] = ref_expanded["department"].str.strip()
     ref_expanded = ref_expanded[ref_expanded["department"] != ""]
+    ref_df_merged = fuzzy_merge(ref_expanded, trans_df, "department", "department")
+    ref_df_merged["abstract_id_list"] = ref_df_merged["abstract_nr._"].apply(extract_ids)
+    ref_df_merged = ref_df_merged.explode("abstract_id_list")
+    ref_df_merged = ref_df_merged.rename(columns={"abstract_id_list": "abstract_id"})
     
-    ref_merged = fuzzy_merge(ref_expanded, trans_df, "department", "department")
-    ref_merged["abstract_id_list"] = ref_merged["abstract_nr._"].apply(extract_ids)
-    ref_merged = ref_merged.explode("abstract_id_list").rename(columns={"abstract_id_list": "abstract_id"})
-    
-    authors = ref_merged.groupby(["name", "abstract_id"])["English"].apply(lambda x: list(set(x.dropna()))).reset_index().rename(columns={"English": "departments"})
+    authors = (ref_df_merged.groupby(["name", "abstract_id"])["English"].apply(lambda x: list(set(x.dropna()))).reset_index().rename(columns={"English": "departments"}))
     return ref_df, authors
-
-# --- PROCESS DOC (FIXED AUTHOR EXTRACTION) ---
 
 def process_doc(filepath, ref_df, output_folder, remaining_ids):
     txt = extract_docx_text_with_superscripts(filepath)
@@ -373,32 +444,36 @@ def process_doc(filepath, ref_df, output_folder, remaining_ids):
         out = Path(output_folder) / (Path(filepath).stem + "_unchanged.docx")
         doc.save(out)
         recompress_docx_inplace(out)
-        return {"file": Path(filepath).name, "matched": False}
+        return {"file": Path(filepath).name, "name": None, "matched_name": None, "abstract_nr": None, "matched": False}
 
-    def extract_first_author(idx):
-        # FIX: Regex remove "Author" or "Authors" at start of string (with or without colon)
-        line = txt[idx]
-        line = re.sub(r"^\s*Authors?[:\s]*", "", line, flags=re.IGNORECASE).strip()
-        
-        if line and not line.lower().startswith("affiliation"):
-            # Split by common delimiters and remove trailing numbers/digits
-            first_part = re.split(r"[;,&]", line)[0].strip()
-            return re.sub(r"\d+$", "", first_part).strip()
-            
-        for i in range(idx + 1, len(txt)):
-            cand = txt[i].strip()
-            if not cand: continue
-            if "affiliation" in cand.lower(): break
-            return re.sub(r"\d+$", "", cand.split(",")[0].strip()).strip()
+    def extract_first_author(txt, author_line_index):
+        line = txt[author_line_index]
+        line_clean = line.replace("Authors:", "").replace("Author:", "").replace("Authors", "").replace("Author", "").strip()
+        if line_clean and not line_clean.lower().startswith("affiliation"):
+            first = re.split(r"[;,&]", line_clean)[0].strip()
+            first = re.sub(r"\d+$", "", first).strip()
+            if first: return first
+        i = author_line_index + 1
+        while i < len(txt):
+            candidate = txt[i].strip()
+            if not candidate:
+                i += 1
+                continue
+            if "affiliation" in candidate.lower(): break
+            first = candidate.split(",")[0].strip()
+            first = re.sub(r"\d+$", "", first).strip()
+            if first: return first
+            i += 1
         return ""
 
-    name = clean_name(extract_first_author(author_line))
-    matched_name = match_author_name(name, ref_df)
+    name = extract_first_author(txt, author_line)
+    name = clean_name(name)
+    matched_name = match_author_name(name, ref_df, "name")
     
     abstract_nr = None
     if matched_name:
         key = matched_name.strip()
-        if key in remaining_ids and remaining_ids[key]:
+        if key in remaining_ids and len(remaining_ids[key]) > 0:
             abstract_nr = remaining_ids[key].pop(0)
 
     doc = Document(filepath)
@@ -424,30 +499,38 @@ def process_doc(filepath, ref_df, output_folder, remaining_ids):
         run = p_label.add_run(f"Abstract number: {abstract_nr}")
         run.bold = True
         run.font.color.rgb = RGBColor(255, 0, 0)
-        doc._element.body.remove(p._p)
-        doc.paragraphs[0]._p.addnext(p._p)
+        body.remove(p_label._p)
+        title_p._p.addnext(p_label._p)
 
-    for _ in range(5): doc._element.body.insert(1, OxmlElement("w:p"))
+    for _ in range(5):
+        empty_p = OxmlElement("w:p")
+        body.insert(1, empty_p)
     force_document_font(doc, font_name="Arial", font_size=12)
 
-    fname = f"srd_abstract_{abstract_nr}.docx" if abstract_nr else Path(filepath).stem + "_no_number.docx"
-    out = Path(output_folder) / fname
-    doc.save(out)
-    recompress_docx_inplace(out)
-    
+    if abstract_nr is not None:
+        output_filename = f"srd_abstract_{abstract_nr}.docx"
+    else:
+        output_filename = Path(filepath).stem + "_no_number.docx"
+
+    out_path = Path(output_folder) / output_filename
+    doc.save(out_path)
+    recompress_docx_inplace(out_path, remove_thumbnail=True)
+
     return {"file": Path(filepath).name, "name": name, "matched_name": matched_name, "abstract_nr": abstract_nr, "matched": abstract_nr is not None}
 
-def build_ids(ref_df):
-    ids = {}
+def build_remaining_ids_dict(ref_df):
+    id_dict = {}
     for _, row in ref_df.iterrows():
         name = str(row.get("name", "")).strip()
-        nums = extract_ids(row.get("abstract_nr._", ""))
-        if nums:
-            if name not in ids: ids[name] = []
-            for n in nums: 
-                if n not in ids[name]: ids[name].append(n)
-            ids[name].sort()
-    return ids
+        raw = row.get("abstract_nr._", "")
+        ids = extract_ids(raw)
+        if not ids: continue
+        if name not in id_dict: id_dict[name] = []
+        for x in ids:
+            if x not in id_dict[name]: id_dict[name].append(x)
+    for k in id_dict: id_dict[k] = sorted(id_dict[k])
+    return id_dict
+
 
 # ==========================================
 #  3. MAIN PIPELINE
@@ -466,15 +549,15 @@ def run_pipeline(ref_file, trans_file, reviewer_file, docx_files, max_part_mb=80
         
     # Process Logic
     ref_df, authors = prepare_ref_and_authors(ref_file, trans_file)
-    remaining_ids = build_ids(ref_df)
+    remaining_ids = build_remaining_ids_dict(ref_df)
     
-    # --- ERROR FIX: SAFE EXCEL LOADING ---
+    # --- RESTORED SHEET NAME "Reviewers" ---
     reviewer_bytes = reviewer_file.getvalue()
     try:
         reviewer_df = read_excel_with_auto_header_from_bytes(reviewer_bytes, sheet_name="Reviewers")
     except ValueError:
         reviewer_df = read_excel_with_auto_header_from_bytes(reviewer_bytes, sheet_name=0)
-    
+
     reviewer_df.columns = reviewer_df.columns.str.lower().str.strip()
     reviewer_df = reviewer_df.rename(columns={"reviewer signup": "reviewer_name", "department": "reviewer_department"})
     reviewer_df["reviewer_department"] = reviewer_df["reviewer_department"].astype(str).str.strip()
